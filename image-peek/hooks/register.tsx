@@ -3,6 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { PeekImage } from '../types'
 import { capture, notePaths, offerPaneAgain } from './capture'
+import { chip, hoverChip, hoverable, preview } from './chips'
 import { ensureDir, host, hostFor, imagePaths, openExternally, removeDir, sweepStale } from './host'
 import { drafts, dropDrafts, forRow, hasDraft, latest, placeholders, sent, tagDrafts } from './list'
 import { INLINE, draw, graphics } from './picture'
@@ -15,9 +16,6 @@ type $ = EngineInterface
 const selected = atom({ plugin: 'image-peek', key: 'selected' } as const, null)
 /** Fewest rows a hover preview is drawn in; with fewer the band shows a hint. */
 const MIN_CARD_ROWS = 6
-
-/** The hover group that ties a message's chip to its preview in the band. */
-const scopeOf = (img: PeekImage) => `peek-${img.id}`.slice(0, 64)
 
 /** Opens the pane the person asked for: it takes the keys, and Escape closes it. */
 const openPane = ($: $) => $.ui.open({ id: PANE, title: 'Images', focus: true, closeOnEscape: true })
@@ -141,16 +139,11 @@ export const register: Register = (on, options) => {
     const list = await pictures($)
     const inPrompt = drafts(list)
     const canHover = e.surface === 'terminal' && isFullscreen()
-    // Pictures hidden until a chip is hovered: the draft's chips here, and
-    // the sent ones' chips in the transcript.
-    const hovered = canHover ? [...inPrompt, ...sent(list)] : []
+    // Pictures hidden until a chip is hovered (see chips.tsx).
+    const hovered = canHover ? hoverable(list) : []
     if (inPrompt.length === 0 && hovered.length === 0) return next(e)
-    const { Box, Button, Text } = $.ui.resolve(e)
-    const label = (img: PeekImage) => (
-      <Button key={`draft-${img.id}`} plain onPress={() => select($, img)}>
-        <Text color="cyan" hover={{ scope: scopeOf(img), bold: true, underline: true }}>▣ Image {img.n}</Text>
-      </Button>
-    )
+    const { Box } = $.ui.resolve(e)
+    const label = (img: PeekImage) => chip($, e, img, 'band', () => select($, img))
     if (e.surface !== 'terminal') {
       return (
         <Box flexDirection="row" gap={2}>
@@ -173,23 +166,12 @@ export const register: Register = (on, options) => {
     const pics = canHover ? [] : await Promise.all(inPrompt.map(img => draw($, e, options, img, 'inline', INLINE.columns, rows)))
     return (
       <Box flexDirection="column">
-        {room >= 1 &&
-          hovered.map((img, i) => (
-            <Box key={`preview-${img.id}`} flexDirection="column" display="none" hover={{ scope: scopeOf(img), display: 'flex' }}>
-              <Text color="cyan" wrap="truncate">
-                Image {img.n}
-                {hasRoom ? '' : ' · click to open'}
-              </Text>
-              {hasRoom && previews[i]}
-            </Box>
-          ))}
+        {room >= 1 && hovered.map((img, i) => preview($, e, img, previews[i]))}
         {inPrompt.length > 0 && (
           <Box flexDirection="row" gap={canHover ? 2 : 3}>
             {inPrompt.map((img, i) =>
               canHover ? (
-                <Box key={`band-${img.id}`} hover={{ scope: scopeOf(img) }}>
-                  {label(img)}
-                </Box>
+                hoverChip($, e, img, 'band', () => select($, img))
               ) : (
                 <Box key={`band-${img.id}`} flexDirection="column">
                   {label(img)}
@@ -231,7 +213,7 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const { Box, Text } = $.ui.resolve(e)
     if (e.viewport?.isFullscreen !== true) {
       const thumbs = await Promise.all(mine.map(img => draw($, e, options, img, 'inline', INLINE.columns, INLINE.rows)))
       return (
@@ -249,20 +231,12 @@ export const register: Register = (on, options) => {
       )
     }
 
-    // The chip lights its hover scope; the band above the prompt holds the
-    // picture for that scope and shows it while the chip is hovered. A card
-    // drawn over the transcript would be painted over by the rows after it.
+    // Hovering a chip shows its picture in the band (see chips.tsx).
     return (
       <Box flexDirection="column">
         {own}
         <Box flexDirection="row" gap={2} marginLeft={2}>
-          {mine.map(img => (
-            <Box key={`chip-${img.id}`} hover={{ scope: scopeOf(img) }}>
-              <Button key={`peek-${img.id}`} plain onPress={() => select($, img)}>
-                <Text color="cyan" hover={{ scope: scopeOf(img), bold: true, underline: true }}>▣ Image {img.n}</Text>
-              </Button>
-            </Box>
-          ))}
+          {mine.map(img => hoverChip($, e, img, 'message', () => select($, img)))}
         </Box>
       </Box>
     )
