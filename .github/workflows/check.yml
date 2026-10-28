@@ -30,7 +30,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22
+          node-version: 24
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code@${{ matrix.claude-code }}
       - name: Validate the marketplace
@@ -44,3 +44,65 @@ jobs:
             claude plugin test "./$dir"
             echo "::endgroup::"
           done
+
+  # Lists each version CI depends on next to the newest release, in the run's
+  # summary, and warns about any that are behind. Actions are left to
+  # Dependabot.
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare with the latest releases
+        shell: python
+        run: |
+          import json, os, re, urllib.request
+          import yaml
+
+          def fetch(url):
+              with urllib.request.urlopen(url, timeout=30) as r:
+                  return json.load(r)
+
+          def lookup(what, get):
+              # A failed lookup is reported, not fatal: the other rows still show.
+              try:
+                  return str(get())
+              except Exception as e:
+                  print(f"::warning::Could not look up {what}: {e}")
+                  return None
+
+          def parts(v):
+              return tuple(int(n) for n in re.findall(r"\d+", v))
+
+          def status(used, latest):
+              if not used or not latest:
+                  return "unknown"
+              if parts(used) == parts(latest):
+                  return "latest"
+              return "ahead" if parts(used) > parts(latest) else "behind"
+
+          mods = yaml.safe_load(open(".github/workflows/check.yml"))["jobs"]["mods"]
+          cc_used = lookup("the pinned Claude Code version", lambda: mods["strategy"]["matrix"]["claude-code"][0])
+          node_used = lookup("the CI Node.js version", lambda: next(
+              s["with"]["node-version"] for s in mods["steps"] if s.get("uses", "").startswith("actions/setup-node@")))
+          cc_latest = lookup("the latest Claude Code", lambda: fetch("https://registry.npmjs.org/@anthropic-ai/claude-code/latest")["version"])
+          node_lts = lookup("the latest Node.js LTS", lambda: next(
+              r["version"][1:] for r in fetch("https://nodejs.org/dist/index.json") if r["lts"]))
+          ts_latest = lookup("the latest TypeScript", lambda: fetch("https://registry.npmjs.org/typescript/latest")["version"])
+
+          node_lts_major = node_lts and node_lts.split(".")[0]
+          rows = [
+              ("Claude Code (pinned in the matrix)", cc_used, cc_latest, status(cc_used, cc_latest)),
+              ("Node.js (major)", node_used, node_lts and f"{node_lts} (LTS)", status(node_used, node_lts_major)),
+              ("TypeScript (unpinned, via npx)", "latest", ts_latest, "latest" if ts_latest else "unknown"),
+          ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("| Dependency | Used | Latest | Status |\n| --- | --- | --- | --- |\n")
+              for row in rows:
+                  f.write("| " + " | ".join(v or "unknown" for v in row) + " |\n")
+
+          if rows[0][3] == "behind":
+              print(f"::warning::Claude Code {cc_latest} is out; the matrix pins {cc_used}")
+          if rows[1][3] == "behind":
+              print(f"::warning::Node.js {node_lts_major} is the current LTS; CI uses {node_used}")
