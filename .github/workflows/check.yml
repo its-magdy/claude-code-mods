@@ -42,6 +42,8 @@ jobs:
             echo "::group::$dir"
             claude plugin validate "./$dir" --strict
             claude plugin test "./$dir"
+            # The release workflow needs an entry for the current version.
+            .github/scripts/release-notes.sh "$dir" >/dev/null
             echo "::endgroup::"
           done
 
