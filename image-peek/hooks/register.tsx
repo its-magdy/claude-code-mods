@@ -10,13 +10,11 @@ import {
   hostFor,
   imagePaths,
   isImageFile,
-  join,
   linuxPath,
   openExternally,
   pngSize,
   recentScreenshot,
   removeDir,
-  removeFiles,
   sweepStale,
   toPng,
   writeBase64,
@@ -25,7 +23,6 @@ import type { Host } from './host'
 import {
   MAX_KEPT,
   addDraft,
-  capped,
   drafts,
   dropDrafts,
   forRow,
@@ -39,15 +36,14 @@ import {
   unread,
 } from './list'
 import { INLINE, draw, forget, graphics, warm } from './picture'
-import { generation, isDebugOn, isFullscreen, later, nextGeneration, noteViewport, probe, toggleDebug } from './session'
+import { begin, claim, isLive, keep, pictures, reset } from './pictures'
+import type { Work } from './pictures'
+import { isDebugOn, isFullscreen, later, noteViewport, probe, toggleDebug } from './session'
 
 type $ = EngineInterface
 
 const PANE = 'image-peek'
 
-// Change the tag when PeekImage's fields change: values an earlier version
-// stored outlive a reload, and are read as absent under another tag.
-const images = atom({ plugin: 'image-peek', key: 'images' } as const, [], { shape: 'images-2' })
 const selected = atom({ plugin: 'image-peek', key: 'selected' } as const, null)
 /** Fewest rows a hover preview is drawn in; with fewer the band shows a hint. */
 const MIN_CARD_ROWS = 6
@@ -70,54 +66,34 @@ let stamps = 0
 /** A file-name stamp no other capture or copy shares, even in the same millisecond. */
 const uniqueStamp = async ($: $) => `${await $.clock.now()}-${++stamps}`
 
-/** A path's last part: the name `removeFiles` matches. */
-const fileName = (path: string) => path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1)
-
-/**
- * Changes the list for work of generation `born`, capped to the newest
- * MAX_KEPT; deletes the files and cached drawings of the entries it drops.
- * False when a newer generation came first: the change was not made.
- */
-async function setImages($: $, born: number, change: (list: PeekImage[]) => PeekImage[]) {
-  if (born !== generation()) return false
-  let isMade = false
-  let dropped: PeekImage[] = []
-  await update($, images, list => {
-    // Checked on every run: an update can run again after a /peek clear that
-    // came in the meantime, and must not bring old pictures back.
-    isMade = born === generation()
-    if (!isMade) {
-      dropped = []
-      return list
-    }
-    const next = capped(change([...list]))
-    dropped = list.filter(img => !next.some(kept => kept.id === img.id))
-    return next
-  })
-  if (dropped.length === 0) return isMade
-  for (const img of dropped) forget(img)
-  const h = await host($)
-  await removeFiles($, h, dropped.map(img => img.id), dropped.map(img => fileName(img.path)))
-  return isMade
+/** Drops the session's pictures (see `reset`) and what was kept to draw them. */
+async function resetPictures($: $, files: 'delete' | 'leave') {
+  for (const img of await reset($, files)) forget(img)
 }
 
-/** Makes the PNG and its two thumbnails, and reads the thumbnail's size. */
+/** Changes the list for the work (see `keep`); false when it was not made. */
+async function setImages($: $, work: Work, change: (list: PeekImage[]) => PeekImage[]) {
+  const { isKept, dropped } = await keep($, work, change)
+  for (const img of dropped) forget(img)
+  return isKept
+}
+
+/** Makes the PNG and its two thumbnails, and reads the thumbnail's size; a step file the work made goes when it ends. */
 async function finish(
   $: $,
+  work: Work,
   h: Host,
   base: Pick<PeekImage, 'id' | 'n' | 'source' | 'messageId' | 'promptText'> & { file: string },
 ): Promise<PeekImage | undefined> {
   let path = base.file
   if (!/\.png$/i.test(path)) {
-    const png = join(h, `${base.id}.png`)
+    const png = claim(work, h, `${base.id}.png`)
     if (!(await toPng($, h, path, png))) return undefined
-    // The original was only a step to the PNG; one outside our folder is the person's own.
-    if (path.startsWith(h.dir)) await removeFiles($, h, [], [fileName(path)])
     path = png
   }
-  const thumb = join(h, `${base.id}.thumb.png`)
+  const thumb = claim(work, h, `${base.id}.thumb.png`)
   const shown = (await toPng($, h, path, thumb, 800)) ? thumb : path
-  const small = join(h, `${base.id}.small.png`)
+  const small = claim(work, h, `${base.id}.small.png`)
   const smallShown = (await toPng($, h, shown, small, 400)) ? small : shown
   const { width, height } = await pngSize($, shown)
   const { file: _file, ...rest } = base
@@ -125,7 +101,7 @@ async function finish(
 }
 
 /** Copies files a drop or paste named, at once: macOS deletes a screenshot thumbnail's temporary file soon after. */
-async function copyDropped($: $, paths: string[]) {
+async function copyDropped($: $, work: Work, paths: string[]) {
   const h = await host($)
   await ensureDir($, h)
   const home = (await $.env.get('HOME')) ?? ''
@@ -133,7 +109,7 @@ async function copyDropped($: $, paths: string[]) {
   for (const [i, path] of paths.entries()) {
     const from = await linuxPath($, h, path.startsWith('~/') ? home + path.slice(1) : path)
     const ext = from.match(/\.[A-Za-z0-9]+$/)?.[0] ?? '.png'
-    const copy = join(h, `drop-${await uniqueStamp($)}-${i}${ext}`)
+    const copy = claim(work, h, `drop-${await uniqueStamp($)}-${i}${ext}`)
     if (await copyFile($, h, from, copy)) copies.push(copy)
   }
   return copies
@@ -142,42 +118,31 @@ async function copyDropped($: $, paths: string[]) {
 /**
  * Saves the picture behind each new "[Image #N]" of the draft: from the file
  * the same paste named, else the clipboard, when it holds an image copied
- * since the last grab.
+ * since the last grab. `files` are copies the work made; what no kept picture
+ * takes goes when the work ends.
  */
-async function captureDraft($: $, options: PluginOptions, born: number, ns: number[], via: string, files: string[] = []) {
+async function captureDraft($: $, options: PluginOptions, work: Work, ns: number[], via: string, files: string[] = []) {
+  if (!isLive(work)) return
   const h = await host($)
-  // The copies a drop made that no placeholder here takes.
-  const unused = (from: number) => removeFiles($, h, [], files.slice(from).map(fileName))
-  if (born !== generation()) return unused(0)
   await ensureDir($, h)
-  await unused(ns.length)
   for (const [i, n] of ns.entries()) {
     // Claimed before any wait, so a second capture of this number stops here.
-    if (inFlight.has(n)) {
-      if (files[i]) await removeFiles($, h, [], [fileName(files[i])])
-      continue
-    }
+    if (inFlight.has(n)) continue
     inFlight.add(n)
-    // Copies this capture made: a capture that ends without a kept picture
-    // (cancelled, cleared, failed, already shown) deletes them and everything under its id.
-    const copies: string[] = files[i] ? [files[i]] : []
-    let isKept = false
-    let id = ''
     try {
-      id = `draft-${n}-${await uniqueStamp($)}`
-      if (hasDraft(await read($, images), n)) continue
+      const id = `draft-${n}-${await uniqueStamp($)}`
+      if (hasDraft(await pictures($), n)) continue
       let file = files[i]
       let source: PeekSource = 'file'
       if (!file) {
         source = 'clipboard'
-        const out = join(h, `${id}.png`)
+        const out = claim(work, h, `${id}.png`)
         const grab = await grabClipboard($, h, out)
         const isStale = grab.change !== undefined && grab.change === lastChange
         void probe($, 'clipboard', { n, via, isStale, ...grab, file: grab.file !== undefined })
         if (grab.change !== undefined) lastChange = grab.change
         if (!isStale && grab.file && isImageFile(grab.file)) {
-          const [copy] = await copyDropped($, [grab.file])
-          if (copy) copies.push(copy)
+          const [copy] = await copyDropped($, work, [grab.file])
           file = copy
           source = 'file'
         } else if (!isStale && grab.isSaved) {
@@ -190,17 +155,14 @@ async function captureDraft($: $, options: PluginOptions, born: number, ns: numb
           const { path: shot, isDenied } = await recentScreenshot($, h, 120_000, usedShots)
           void probe($, 'screenshot', { n, isFound: shot !== undefined, isDenied })
           if (shot) {
-            await removeFiles($, h, [id])
             usedShots.add(shot)
-            const [copy] = await copyDropped($, [shot])
-            if (copy) copies.push(copy)
+            const [copy] = await copyDropped($, work, [shot])
             file = copy
             source = 'file'
           } else if (grab.isSaved) {
             file = out
           } else if (grab.file && isImageFile(grab.file)) {
-            const [copy] = await copyDropped($, [grab.file])
-            if (copy) copies.push(copy)
+            const [copy] = await copyDropped($, work, [grab.file])
             file = copy
             source = 'file'
           } else if (isDenied && !isDeniedTold) {
@@ -213,12 +175,11 @@ async function captureDraft($: $, options: PluginOptions, born: number, ns: numb
         $.ui.toast(`Image #${n}: it will show once sent.`)
         continue
       }
-      const entry = born === generation() ? await finish($, h, { id, n, source, file }) : undefined
+      const entry = isLive(work) ? await finish($, work, h, { id, n, source, file }) : undefined
       if (!entry) continue
       // The draft may have been sent or edited while the picture was made.
-      if (born !== generation() || !(await $.prompt.read()).text.includes(`[Image #${n}]`)) continue
-      isKept = await setImages($, born, list => addDraft(list, entry))
-      if (!isKept) continue
+      if (!isLive(work) || !(await $.prompt.read()).text.includes(`[Image #${n}]`)) continue
+      if (!(await setImages($, work, list => addDraft(list, entry)))) continue
       await warm($, options, entry)
       if (options.autoOpenPane === true && isFullscreen() && !isPaneOffered) {
         isPaneOffered = true
@@ -226,7 +187,6 @@ async function captureDraft($: $, options: PluginOptions, born: number, ns: numb
       }
     } finally {
       inFlight.delete(n)
-      if (!isKept) await removeFiles($, h, id ? [id] : [], copies.map(fileName))
     }
   }
 }
@@ -235,7 +195,7 @@ async function captureDraft($: $, options: PluginOptions, born: number, ns: numb
 async function keepPrompt(
   $: $,
   options: PluginOptions,
-  born: number,
+  work: Work,
   content: readonly ApiContentBlock[],
   where: { messageId?: string; idPrefix: string; source: PeekSource },
 ) {
@@ -246,44 +206,41 @@ async function keepPrompt(
   const h = await host($)
   await ensureDir($, h)
 
+  // What isn't kept (a failed write or conversion, a list a /peek clear or
+  // a switch got to first) goes when the work ends; an earlier, listed copy
+  // of this row has the same names, so those stay.
   const kept: PeekImage[] = []
-  // Pictures made for a list a /peek clear or a switch got to first.
-  const drop = () => removeFiles($, h, kept.map(img => img.id), kept.map(img => fileName(img.path)))
   for (const [i, block] of blocks.entries()) {
-    if (born !== generation()) return drop()
+    if (!isLive(work)) return
     const source = block.source as { type?: string; media_type?: string; data?: string } | undefined
     if (source?.type !== 'base64' || typeof source.data !== 'string') continue
     const n = named[i] ?? i + 1
     const ext = (source.media_type ?? 'image/png').split('/')[1]?.replace('jpeg', 'jpg') ?? 'png'
     const id = `${where.idPrefix}-${n}`
-    const raw = join(h, `${id}.${ext}`)
+    const raw = claim(work, h, `${id}.${ext}`)
     const entry = (await writeBase64($, h, source.data, raw))
-      ? await finish($, h, { id, n, source: where.source, file: raw, messageId: where.messageId, promptText: text })
+      ? await finish($, work, h, { id, n, source: where.source, file: raw, messageId: where.messageId, promptText: text })
       : undefined
     if (entry) kept.push(entry)
-    // A failed write or conversion leaves its part-made files; an earlier,
-    // listed copy of this row has the same names, so those stay.
-    else if (!(await read($, images)).some(img => img.id === id)) await removeFiles($, h, [id])
   }
   void probe($, where.source, { messageId: where.messageId, named, kept: kept.length, chars: text.length })
   if (kept.length === 0) return
-  const isMade = await setImages($, born, list => storePrompt(list, kept, { messageId: where.messageId, text }))
-  if (!isMade) return drop()
+  if (!(await setImages($, work, list => storePrompt(list, kept, { messageId: where.messageId, text })))) return
   // The cap may have left out the oldest of these; only listed pictures get cells.
-  const listed = await read($, images)
+  const listed = await pictures($)
   for (const img of kept) if (listed.some(entry => entry.id === img.id)) await warm($, options, img)
 }
 
 /** A resumed session's pictures, read back from the conversation; each user row by its place, so equal texts stay apart. */
-async function loadHistory($: $, options: PluginOptions, born: number) {
+async function loadHistory($: $, options: PluginOptions, work: Work) {
   const messages = await $.session.messages({ as: 'api' })
   if ('deny' in messages) return
   const rows = messages
     .map((m, index) => ({ content: m.content, idPrefix: `hist-${index}`, isPrompt: m.role === 'user' }))
     .filter(row => row.isPrompt && row.content.some(b => b.type === 'image') && !row.content.some(b => b.type === 'tool_result'))
     .slice(-MAX_KEPT)
-  for (const row of unread(await read($, images), rows)) {
-    await keepPrompt($, options, born, row.content, { idPrefix: row.idPrefix, source: 'history' })
+  for (const row of unread(await pictures($), rows)) {
+    await keepPrompt($, options, work, row.content, { idPrefix: row.idPrefix, source: 'history' })
   }
 }
 
@@ -303,9 +260,9 @@ export const register: Register = (on, options) => {
       description: 'Show pasted images: /peek, /peek N, /peek open N, /peek clear, /peek debug',
       argumentHint: '[N | open N | clear | debug]',
     })
-    later($, 'start', async born => {
+    later($, 'start', async work => {
       await graphics($, options)
-      await loadHistory($, options, born)
+      await loadHistory($, options, work)
       await sweepStale($, await host($))
     })
     // Renews the folder's lease while the session lives, so no other
@@ -322,15 +279,14 @@ export const register: Register = (on, options) => {
   // with every plugin; what it leaves, the next start sweeps.
   on('session.end', async ($, e, next) => {
     const ended = await next(e)
-    nextGeneration()
-    await update($, images, () => [])
+    await resetPictures($, 'leave')
     await update($, selected, () => null)
     const old = await hostFor($, e.sessionId)
     if (e.reason === 'clear' || e.reason === 'resume') {
       isPaneOffered = false
-      later($, 'switch', async born => {
+      later($, 'switch', async work => {
         await removeDir($, old)
-        if (e.reason === 'resume') await loadHistory($, options, born)
+        if (e.reason === 'resume') await loadHistory($, options, work)
       }, 300)
     } else if (old.os !== 'windows' && next.budget.remainingMs > 300) {
       await removeDir($, old)
@@ -353,14 +309,14 @@ export const register: Register = (on, options) => {
     if (added.length > 0) {
       // Copied first thing after the edit, before macOS can delete a
       // screenshot's temporary file; on the clock, not on this dispatch.
-      later($, 'capture', async born => captureDraft($, options, born, added, 'edit', paths.length > 0 ? await copyDropped($, paths) : []))
+      later($, 'capture', async work => captureDraft($, options, work, added, 'edit', paths.length > 0 ? await copyDropped($, work, paths) : []))
     } else if (paths.length > 0) {
       const at = await $.clock.now()
       recentPaths.push(...paths.map(path => ({ path, at })))
     }
     const removed = before.filter(n => !after.includes(n))
     if (removed.length > 0) {
-      later($, 'prune', born => setImages($, born, list => dropDrafts(list, n => removed.includes(n))))
+      later($, 'prune', work => setImages($, work, list => dropDrafts(list, n => removed.includes(n))))
     }
     return box
   }).catch(($, e, next) => next(e))
@@ -371,16 +327,16 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     const present = placeholders(e.text)
     if (e.origin.kind === 'clear') {
-      later($, 'prune', born => setImages($, born, list => dropDrafts(list, n => !present.includes(n))))
+      later($, 'prune', work => setImages($, work, list => dropDrafts(list, n => !present.includes(n))))
     } else if (present.length > 0 && e.origin.kind !== 'history') {
       void probe($, 'prompt.change', { origin: e.origin.kind, present })
-      const list = await read($, images)
+      const list = await pictures($)
       const missing = present.filter(n => !hasDraft(list, n))
       if (missing.length > 0) {
         const at = await $.clock.now()
         const paths = recentPaths.splice(0).filter(p => at - p.at < 3_000).map(p => p.path)
         const via = `change:${e.origin.kind}`
-        later($, 'capture', async born => captureDraft($, options, born, missing, via, paths.length > 0 ? await copyDropped($, paths) : []))
+        later($, 'capture', async work => captureDraft($, options, work, missing, via, paths.length > 0 ? await copyDropped($, work, paths) : []))
       }
     }
     return result
@@ -396,7 +352,7 @@ export const register: Register = (on, options) => {
         chars: e.text.length,
         attachments: attached.map(a => a.mediaType),
       })
-      await setImages($, generation(), list => tagDrafts(list, e.text))
+      await setImages($, begin(), list => tagDrafts(list, e.text))
     }
     return result
   }).catch(($, e, next) => next(e))
@@ -407,7 +363,7 @@ export const register: Register = (on, options) => {
       const content = stored.message.content
       if (content.some(b => b.type === 'image')) {
         const messageId = stored.uuid
-        later($, 'sent', born => keepPrompt($, options, born, content, { messageId, idPrefix: messageId, source: 'sent' }))
+        later($, 'sent', work => keepPrompt($, options, work, content, { messageId, idPrefix: messageId, source: 'sent' }))
       }
     }
     return stored
@@ -418,7 +374,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     noteViewport(e.viewport)
     if (e.props.hasSurvey) return next(e)
-    const list = await read($, images)
+    const list = await pictures($)
     const inPrompt = drafts(list)
     const canHover = e.surface === 'terminal' && isFullscreen()
     // Pictures hidden until a chip is hovered: the draft's chips here, and
@@ -489,7 +445,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     noteViewport(e.viewport)
     if (!e.props.text.includes('[Image #')) return next(e)
-    const list = await read($, images)
+    const list = await pictures($)
     const mine = forRow(list, e.requestId, e.props.text)
     if (await isDebugOn($)) {
       void probe($, 'UserMessage', { requestId: e.requestId, matched: mine.length, ids: list.map(img => img.messageId) })
@@ -551,7 +507,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     noteViewport(e.viewport)
     const { Box, Button, Text } = $.ui.resolve(e)
-    const list = await read($, images)
+    const list = await pictures($)
     const selectedId = await read($, selected)
     const chosen = list.find(img => img.id === selectedId)
     const columns = Math.max(10, e.props.bodyColumns - 1)
@@ -623,12 +579,11 @@ export const register: Register = (on, options) => {
       return { text: `Debug lines ${isOn ? 'shown in the transcript' : 'in the debug log only'}.` }
     }
     if (first === 'clear') {
-      nextGeneration()
-      await setImages($, generation(), () => [])
+      await resetPictures($, 'delete')
       await update($, selected, () => null)
       return { text: 'Image list cleared.' }
     }
-    const list = await read($, images)
+    const list = await pictures($)
     if (first === undefined) {
       await update($, selected, () => null)
       const { isPlaced } = await openPane($)

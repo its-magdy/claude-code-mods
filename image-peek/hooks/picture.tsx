@@ -7,10 +7,12 @@ import type { EngineInterface, PluginOptions, RenderElement, RenderInput } from 
 
 import type { PeekImage } from '../types'
 import { Lru } from './cache'
-import { host, join, removeFiles, toBmp } from './host'
+import { host, toBmp } from './host'
 import { MAX_KEPT } from './list'
 import { bmpToCells } from './raster'
-import { generation, isFullscreen, later, probe } from './session'
+import { begin, claim, end, isLive } from './pictures'
+import type { Work } from './pictures'
+import { isFullscreen, later, probe } from './session'
 
 type $ = EngineInterface
 type Mode = 'file' | 'bytes' | 'blocks' | 'off'
@@ -39,8 +41,8 @@ const pngCache = new Lru<string | null>(32 * 1024 * 1024, value => value?.length
 const cellCache = new Lru<string | null>((MAX_KEPT * 3 + 1) * CELL_CHARS, value => value?.length ?? 0)
 /** Cells being made, by key: the drawing and `warm` share one job, and so one BMP file. `forget` voids a job under way. */
 const cellJobs = new Map<string, { done: Promise<void>; isVoid: boolean }>()
-/** Keys a drawing waits on until their cells are in, with the generation that asked: a newer one drops the waiter unrun. */
-const cellAsked = new Map<string, number>()
+/** Keys a drawing waits on until their cells are in, with the work that waits: a newer generation drops it unrun. */
+const cellAsked = new Map<string, Work>()
 
 /** How this terminal can show a picture: the setting, else a guess from its env. */
 export async function graphics($: $, options: PluginOptions): Promise<Mode> {
@@ -108,23 +110,27 @@ function makeCells($: $, img: PeekImage, size: Size) {
   let job = cellJobs.get(key)
   if (!job) {
     const made = { done: Promise.resolve(), isVoid: false }
-    made.done = convertCells($, img, size, key, generation(), made).finally(() => cellJobs.delete(key))
+    made.done = convertCells($, img, size, key, made).finally(() => cellJobs.delete(key))
     cellJobs.set(key, made)
     job = made
   }
   return job.done
 }
 
-async function convertCells($: $, img: PeekImage, size: Size, key: string, born: number, job: { isVoid: boolean }) {
-  const h = await host($)
-  const bmp = join(h, `${img.id}-${size.columns}x${size.rows}.bmp`)
-  const ok = await toBmp($, h, img.small, bmp, size.columns, size.rows * 2)
-  const { base64 } = ok ? await $.fs.read(bmp, { as: 'bytes' }).catch(() => ({ base64: '' })) : { base64: '' }
+async function convertCells($: $, img: PeekImage, size: Size, key: string, job: { isVoid: boolean }) {
   // The cells are all that's kept; each window size would leave a BMP behind.
-  await removeFiles($, h, [], [`${img.id}-${size.columns}x${size.rows}.bmp`])
-  // Dropped while its cells were made: keep nothing for a picture that's gone.
-  if (job.isVoid || born !== generation()) return
-  cellCache.set(key, base64 ? (bmpToCells(base64, size.columns, size.rows) ?? null) : null)
+  const work = begin()
+  const h = await host($)
+  try {
+    const bmp = claim(work, h, `${img.id}-${size.columns}x${size.rows}.bmp`)
+    const ok = await toBmp($, h, img.small, bmp, size.columns, size.rows * 2)
+    const { base64 } = ok ? await $.fs.read(bmp, { as: 'bytes' }).catch(() => ({ base64: '' })) : { base64: '' }
+    // Dropped while its cells were made: keep nothing for a picture that's gone.
+    if (job.isVoid || !isLive(work)) return
+    cellCache.set(key, base64 ? (bmpToCells(base64, size.columns, size.rows) ?? null) : null)
+  } finally {
+    await end($, work)
+  }
 }
 
 /** Cells for a size, or undefined while they are made off the drawing; the drawing comes again once they are. */
@@ -133,16 +139,17 @@ function cells($: $, img: PeekImage, size: Size) {
   if (cellCache.has(key)) return cellCache.get(key) ?? undefined
   // One waiter per key, even when `warm` already started the job: it
   // redraws once the cells are in.
-  if (cellAsked.get(key) !== generation()) {
-    cellAsked.set(key, generation())
-    later($, 'cells', async born => {
+  const asked = cellAsked.get(key)
+  if (!asked || !isLive(asked)) {
+    const work = later($, 'cells', async () => {
       try {
         await makeCells($, img, size)
       } finally {
-        if (cellAsked.get(key) === born) cellAsked.delete(key)
+        if (cellAsked.get(key) === work) cellAsked.delete(key)
       }
       $.ui.invalidate('ui.render')
     })
+    cellAsked.set(key, work)
   }
   return undefined
 }

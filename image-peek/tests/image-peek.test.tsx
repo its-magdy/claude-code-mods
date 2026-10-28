@@ -481,3 +481,82 @@ test('blocks: a picture cleared and then restored at the same path draws its cel
   stored.set('images', { shape: 'images-2', value: [SHOT] })
   expect(await drawsCells()).toBe(true)
 })
+
+const STORE_DIR = '/t/claude-image-peek/sess-1'
+
+/**
+ * A macOS session folder in memory: the files the mod's commands write and
+ * delete, so a test reads what is left behind. `isConverting` says whether
+ * sips succeeds.
+ */
+function fakeMac(on: Parameters<TestBody>[1], isConverting: boolean) {
+  const files = new Set<string>()
+  const ok = (stdout = '') => ({ exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false })
+  const failed = { ...ok(), exitCode: 1 }
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('env.get', (_, e) => ({ value: e.name === 'TMPDIR' ? '/t/' : undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  on('fs.write', (_, e) => {
+    files.add(e.path)
+    return { value: undefined }
+  })
+  on('fs.list', (_, e) => ({
+    value: [...files]
+      .filter(path => path.slice(0, path.lastIndexOf('/')) === e.path)
+      .map(path => ({ name: path.slice(path.lastIndexOf('/') + 1), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })),
+  }))
+  on('process.run', (_, e) => ({ value: run(e.argv) }))
+  const run = (argv: readonly string[]) => {
+    if (argv[0] === 'uname') return ok('Darwin 25.0.0')
+    if (argv[0] === 'chmod') return ok()
+    if (argv[0] === 'rm') {
+      for (const path of argv.slice(3)) files.delete(path)
+      return ok()
+    }
+    if (argv[0] === 'sips') {
+      if (!isConverting) return failed
+      files.add(argv.at(-1)!)
+      return ok()
+    }
+    if (argv[0] === 'sh' && argv[2]?.startsWith('base64 --decode')) {
+      files.add(argv.at(-1)!)
+      return ok()
+    }
+    return failed // the header read: an unknown size
+  }
+  return () => [...files].map(path => path.slice(STORE_DIR.length + 1)).sort()
+}
+
+const storeJpeg = ($: Parameters<TestBody>[0]) =>
+  $.session.append({
+    message: {
+      type: 'user',
+      role: 'user',
+      content: [
+        { type: 'text', text: 'look at [Image #1]' },
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'aGVsbG8=' } },
+      ],
+    },
+    door: 'prompt',
+    origin: { kind: 'composer' },
+    uuid: 'row-1',
+  })
+
+test('a stored prompt keeps its PNG and thumbnails; the step file and /peek clear leave only the lease', { options: { graphics: 'file' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const left = fakeMac(on, true)
+  const { uuid } = await storeJpeg($)
+  await clock.settle()
+  expect(left()).toEqual(['.lease', `${uuid}-1.png`, `${uuid}-1.small.png`, `${uuid}-1.thumb.png`])
+
+  await $.command.run({ command: 'peek', args: 'clear', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  expect(left()).toEqual(['.lease'])
+})
+
+test('a stored prompt whose picture cannot be converted leaves no files behind', { options: { graphics: 'file' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const left = fakeMac(on, false)
+  await storeJpeg($)
+  await clock.settle()
+  expect(left()).toEqual(['.lease'])
+})

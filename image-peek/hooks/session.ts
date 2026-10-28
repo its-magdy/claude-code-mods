@@ -1,8 +1,11 @@
-// What the session's hooks share: the generation that work scheduled for
-// later checks, the layout the last drawing saw, and the debug lines.
+// What the session's hooks share: work scheduled for later, the layout the
+// last drawing saw, and the debug lines.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, RenderViewport } from 'claude-code'
+
+import { begin, end, isLive } from './pictures'
+import type { Work } from './pictures'
 
 type $ = EngineInterface
 
@@ -11,18 +14,7 @@ type $ = EngineInterface
 const isDebug = atom({ plugin: 'image-peek', key: 'isDebug' } as const, false)
 
 // Module state: rebuilt after a reload, and nothing drawn depends on it alone.
-/**
- * Bumped when the session's pictures are dropped (a session end, /clear,
- * /resume, /peek clear): work scheduled before then finds it moved and stops
- * before it writes a file or the list.
- */
-let current = 0
 let isFullscreenSeen: boolean | undefined
-
-export const generation = () => current
-export function nextGeneration() {
-  current++
-}
 
 /** Keeps the layout a drawing reports; the mouse and iTerm2's bytes need the fullscreen one. */
 export function noteViewport(viewport: RenderViewport | undefined) {
@@ -50,12 +42,19 @@ export async function probe($: $, label: string, data: unknown) {
 /**
  * Runs work after the hook that asked for it has answered: the reference puts
  * work that outlives a dispatch on `$.clock`, never on the dispatch itself.
+ * The work is of the generation it was asked in (see `begin`); once it ends,
+ * the files it made that no kept picture owns are deleted.
  */
-export function later($: $, label: string, work: (born: number) => Promise<unknown>, ms = 0) {
-  const born = current
+export function later($: $, label: string, job: (work: Work) => Promise<unknown>, ms = 0) {
+  const work = begin()
   $.clock.after(ms, () => {
-    if (born !== current) return
+    if (!isLive(work)) return
     // The error's name only: its message may hold a file path.
-    work(born).catch(error => probe($, `${label} failed`, error instanceof Error ? error.name : typeof error))
+    const failed = (error: unknown) => probe($, `${label} failed`, error instanceof Error ? error.name : typeof error)
+    job(work)
+      .catch(failed)
+      .then(() => end($, work))
+      .catch(failed)
   })
+  return work
 }
