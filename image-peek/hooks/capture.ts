@@ -6,10 +6,10 @@
 
 import type { EngineInterface, PluginOptions } from 'claude-code'
 
-import type { PeekImage, PeekSource } from '../types'
+import type { PeekSource } from '../types'
 import { copyFile, ensureDir, grabClipboard, host, isImageFile, linuxPath, recentScreenshot } from './host'
 import { addDraft, hasDraft } from './list'
-import { forget, warm } from './picture'
+import { warm } from './picture'
 import { claim, finish, isLive, keep, later, pictures } from './pictures'
 import type { Work } from './pictures'
 import { PANE, isFullscreen, probe } from './session'
@@ -76,13 +76,6 @@ async function copyDropped($: $, work: Work, paths: string[]) {
   return copies
 }
 
-/** Adds a draft's picture to the list for the work, and lets go of what it drops; false when it was not made. */
-async function addToList($: $, work: Work, entry: PeekImage) {
-  const { isKept, dropped } = await keep($, work, list => addDraft(list, entry))
-  for (const img of dropped) forget(img)
-  return isKept
-}
-
 /**
  * Saves the picture behind each placeholder of `ns`: from the copy in
  * `files` at its place, else the clipboard or a recent screenshot. `files`
@@ -146,7 +139,7 @@ async function captureDraft($: $, options: PluginOptions, work: Work, ns: number
       if (!entry) continue
       // The draft may have been sent or edited while the picture was made.
       if (!isLive(work) || !(await $.prompt.read()).text.includes(`[Image #${n}]`)) continue
-      if (!(await addToList($, work, entry))) continue
+      if (!(await keep($, work, list => addDraft(list, entry)))) continue
       await warm($, options, entry)
       if (options.autoOpenPane === true && isFullscreen() && !isPaneOffered) {
         isPaneOffered = true

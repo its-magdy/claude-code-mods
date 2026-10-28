@@ -13,6 +13,7 @@ import type { PeekImage } from '../types'
 import { host, join, pngSize, removeFiles, toPng } from './host'
 import type { Host } from './host'
 import { capped } from './list'
+import { forget } from './picture'
 import { probe } from './session'
 
 type $ = EngineInterface
@@ -52,12 +53,12 @@ export async function pictures($: $) {
 }
 
 /**
- * Changes the list for the work, capped to the newest MAX_KEPT, and deletes
- * the files of the entries it drops. Not kept when a newer generation came
+ * Changes the list for the work, capped to the newest MAX_KEPT, and lets go
+ * of the entries it drops (see `release`). False when a newer generation came
  * first: the change was not made.
  */
 export async function keep($: $, work: Work, change: (list: PeekImage[]) => PeekImage[]) {
-  if (!isLive(work)) return { isKept: false, dropped: [] }
+  if (!isLive(work)) return false
   let isKept = false
   let dropped: PeekImage[] = []
   await update($, images, list => {
@@ -72,13 +73,18 @@ export async function keep($: $, work: Work, change: (list: PeekImage[]) => Peek
     dropped = list.filter(img => !next.some(kept => kept.id === img.id))
     return next
   })
-  await removeAll($, dropped)
-  return { isKept, dropped }
+  await release($, dropped, 'delete')
+  return isKept
 }
 
-/** Deletes every file of the pictures: each under its id, and its PNG by name. */
-async function removeAll($: $, dropped: readonly PeekImage[]) {
-  if (dropped.length === 0) return
+/**
+ * Lets go of pictures that left the list: what was kept to draw them, and
+ * with `files: 'delete'` every file of theirs (each under its id, and its PNG
+ * by name).
+ */
+async function release($: $, dropped: readonly PeekImage[], files: 'delete' | 'leave') {
+  for (const img of dropped) forget(img)
+  if (files === 'leave' || dropped.length === 0) return
   await removeFiles($, await host($), dropped.map(img => img.id), dropped.map(img => fileName(img.path)))
 }
 
@@ -98,7 +104,7 @@ async function end($: $, work: Work) {
 }
 
 /**
- * Begins a new generation with an empty list, and gives back what it held.
+ * Begins a new generation with an empty list, and lets go of what it held.
  * `files: 'delete'` deletes their files; 'leave' when the folder goes whole.
  */
 export async function reset($: $, files: 'delete' | 'leave') {
@@ -108,8 +114,7 @@ export async function reset($: $, files: 'delete' | 'leave') {
     dropped = list
     return []
   })
-  if (files === 'delete') await removeAll($, dropped)
-  return dropped
+  await release($, dropped, files)
 }
 
 /** Makes the PNG and its two thumbnails, and reads the thumbnail's size; a step file the work made goes when it ends. */

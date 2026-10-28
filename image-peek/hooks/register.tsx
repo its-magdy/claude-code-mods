@@ -18,7 +18,7 @@ import {
   textOf,
   unread,
 } from './list'
-import { INLINE, draw, forget, graphics, warm } from './picture'
+import { INLINE, draw, graphics, warm } from './picture'
 import { claim, finish, isLive, keep, later, pictures, reset, run } from './pictures'
 import type { Work } from './pictures'
 import { PANE, isDebugOn, isFullscreen, noteViewport, probe, toggleDebug } from './session'
@@ -31,18 +31,6 @@ const MIN_CARD_ROWS = 6
 
 /** The hover group that ties a message's chip to its preview in the band. */
 const scopeOf = (img: PeekImage) => `peek-${img.id}`.slice(0, 64)
-
-/** Drops the session's pictures (see `reset`) and what was kept to draw them. */
-async function resetPictures($: $, files: 'delete' | 'leave') {
-  for (const img of await reset($, files)) forget(img)
-}
-
-/** Changes the list for the work (see `keep`); false when it was not made. */
-async function setImages($: $, work: Work, change: (list: PeekImage[]) => PeekImage[]) {
-  const { isKept, dropped } = await keep($, work, change)
-  for (const img of dropped) forget(img)
-  return isKept
-}
 
 /** Keeps the bytes a stored prompt carried: the pictures exactly as the model got them. */
 async function keepPrompt(
@@ -78,7 +66,7 @@ async function keepPrompt(
   }
   void probe($, where.source, { messageId: where.messageId, named, kept: kept.length, chars: text.length })
   if (kept.length === 0) return
-  if (!(await setImages($, work, list => storePrompt(list, kept, { messageId: where.messageId, text })))) return
+  if (!(await keep($, work, list => storePrompt(list, kept, { messageId: where.messageId, text })))) return
   // The cap may have left out the oldest of these; only listed pictures get cells.
   const listed = await pictures($)
   for (const img of kept) if (listed.some(entry => entry.id === img.id)) await warm($, options, img)
@@ -132,7 +120,7 @@ export const register: Register = (on, options) => {
   // with every plugin; what it leaves, the next start sweeps.
   on('session.end', async ($, e, next) => {
     const ended = await next(e)
-    await resetPictures($, 'leave')
+    await reset($, 'leave')
     await update($, selected, () => null)
     const old = await hostFor($, e.sessionId)
     if (e.reason === 'clear' || e.reason === 'resume') {
@@ -163,7 +151,7 @@ export const register: Register = (on, options) => {
     else if (paths.length > 0) await notePaths($, paths)
     const removed = before.filter(n => !after.includes(n))
     if (removed.length > 0) {
-      later($, 'prune', work => setImages($, work, list => dropDrafts(list, n => removed.includes(n))))
+      later($, 'prune', work => keep($, work, list => dropDrafts(list, n => removed.includes(n))))
     }
     return box
   }).catch(($, e, next) => next(e))
@@ -174,7 +162,7 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     const present = placeholders(e.text)
     if (e.origin.kind === 'clear') {
-      later($, 'prune', work => setImages($, work, list => dropDrafts(list, n => !present.includes(n))))
+      later($, 'prune', work => keep($, work, list => dropDrafts(list, n => !present.includes(n))))
     } else if (present.length > 0 && e.origin.kind !== 'history') {
       void probe($, 'prompt.change', { origin: e.origin.kind, present })
       const list = await pictures($)
@@ -194,7 +182,7 @@ export const register: Register = (on, options) => {
         chars: e.text.length,
         attachments: attached.map(a => a.mediaType),
       })
-      await run($, work => setImages($, work, list => tagDrafts(list, e.text)))
+      await run($, work => keep($, work, list => tagDrafts(list, e.text)))
     }
     return result
   }).catch(($, e, next) => next(e))
@@ -421,7 +409,7 @@ export const register: Register = (on, options) => {
       return { text: `Debug lines ${isOn ? 'shown in the transcript' : 'in the debug log only'}.` }
     }
     if (first === 'clear') {
-      await resetPictures($, 'delete')
+      await reset($, 'delete')
       await update($, selected, () => null)
       return { text: 'Image list cleared.' }
     }
