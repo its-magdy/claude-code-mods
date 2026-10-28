@@ -5,6 +5,7 @@ import type { PeekImage } from '../types'
 import { toBase64 } from '../hooks/base64'
 import { Lru } from '../hooks/cache'
 import { imagePaths, writeBase64Command } from '../hooks/host'
+import { addDraft, drafts, forRow, sent, storePrompt, tagDrafts, unread } from '../hooks/list'
 import { bmpToCells, readBmp } from '../hooks/raster'
 
 const SHOT: PeekImage = {
@@ -332,4 +333,48 @@ test('a resumed row finds its image past a slash command record merged into its 
   const ui = await rowOf($, 'aaaaaaaa-bbbb-cccc-dddd-000000000000', '[Image #1] [Image #2] test')
   expect(await ui.find({ key: 'peek-hist-5-1' })).toBeDefined()
   await ui.unmount()
+})
+
+test('the pane lists a submitted picture under Sent before its stored bytes arrive', async ($, on) => {
+  const submitted: PeekImage = { ...SHOT, id: 'draft-1-5', source: 'clipboard', messageId: undefined }
+  on('state.get', seed({ images: [submitted], isDebug: false }))
+  const ui = await $.ui.mount({
+    plugin: 'image-peek',
+    surface: 'desktop',
+    component: 'Pane',
+    requestId: 'image-peek',
+    props: { title: 'Images', isFocused: false, bodyColumns: 40, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
+  })
+  expect(await ui.find({ type: 'Text', text: /^In your prompt$/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Sent$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a picture goes from the draft to its sent row; the next draft stays', async () => {
+  const draft = (n: number, addedAt: number): PeekImage => ({ ...SHOT, id: `draft-${n}-${addedAt}`, n, source: 'clipboard', messageId: undefined, promptText: undefined, addedAt })
+  let list = addDraft(addDraft([], draft(1, 1)), draft(1, 2)) // a second paste of #1 replaces the first
+  expect(drafts(list).map(img => img.id)).toEqual(['draft-1-2'])
+
+  list = tagDrafts(list, 'fix the margin in [Image #1]')
+  expect([drafts(list).length, sent(list).length]).toEqual([0, 1])
+  // Before its bytes are stored, the row finds the picture by its text.
+  expect(forRow(list, '08e22b78-772c-44ea-8c48-000000000000', 'fix the margin in [Image #1]').map(img => img.id)).toEqual(['draft-1-2'])
+
+  list = addDraft(list, draft(1, 3)) // the next prompt's #1
+  const stored: PeekImage = { ...SHOT, id: 'msg-1', messageId: '08e22b78-772c-44ea-8c48-220f9dd6f0cb', addedAt: 4 }
+  list = storePrompt(list, [stored], { messageId: stored.messageId, text: 'fix the margin in [Image #1]' })
+  expect(list.map(img => img.id)).toEqual(['draft-1-3', 'msg-1'])
+  expect(forRow(list, '08e22b78-772c-44ea-8c48-000000000000', 'anything').map(img => img.id)).toEqual(['msg-1'])
+})
+
+test('a resumed row is read back unless this session sent as many rows of its text', async () => {
+  const row = (index: number, reminder: string) => ({
+    idPrefix: `hist-${index}`,
+    content: [{ type: 'text' as const, text: `<system-reminder>${reminder}</system-reminder>\n[Image #1] test` }],
+  })
+  const sentOnce: PeekImage = { ...SHOT, id: 'msg-1', messageId: 'msg-1', promptText: '[Image #1] test' }
+  // Two rows of one prompt text that differ only in a hidden reminder: one was sent here, one is new.
+  expect(unread([sentOnce], [row(2, 'a'), row(7, 'b')]).map(r => r.idPrefix)).toEqual(['hist-7'])
+  // A row read back on an earlier load is not read again.
+  expect(unread([{ ...SHOT, id: 'hist-7-1' }], [row(7, 'b')])).toEqual([])
 })

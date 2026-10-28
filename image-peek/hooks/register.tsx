@@ -24,6 +24,22 @@ import {
 } from './host'
 import { Lru } from './cache'
 import type { Host } from './host'
+import {
+  MAX_KEPT,
+  addDraft,
+  capped,
+  drafts,
+  dropDrafts,
+  forRow,
+  hasDraft,
+  latest,
+  placeholders,
+  sent,
+  storePrompt,
+  tagDrafts,
+  textOf,
+  unread,
+} from './list'
 import { bmpToCells } from './raster'
 
 type $ = EngineInterface
@@ -31,9 +47,7 @@ type Mode = 'file' | 'bytes' | 'blocks' | 'off'
 type View = 'inline' | 'card' | 'pane' | 'big'
 
 const PANE = 'image-peek'
-const PLACEHOLDER = /\[Image #(\d+)\]/g
 const MAX_BYTES = 2 * 1024 * 1024
-const MAX_KEPT = 40
 // The fixed boxes thumbnails are drawn in: inline under a message on the main
 // screen, and the hover card in the fullscreen layout.
 const INLINE = { columns: 28, rows: 8 }
@@ -89,30 +103,6 @@ function nextGeneration() {
 
 /** The hover group that ties a message's chip to its preview in the band. */
 const scopeOf = (img: PeekImage) => `peek-${img.id}`.slice(0, 64)
-const placeholders = (text: string) => [...new Set([...text.matchAll(PLACEHOLDER)].map(m => Number(m[1])))]
-/** A prompt's words as the person typed them: the engine's hidden reminders out, spaces folded. */
-const promptWords = (text: string) =>
-  text
-    // Engine blocks: `<system-reminder>`, and a slash command's record
-    // (`<command-name>`, `<local-command-stdout>`, …) that a resumed
-    // conversation merges into the next prompt's row.
-    .replace(/<([a-z][a-z0-9_-]*)>[\s\S]*?<\/\1>/g, ' ')
-    // The engine notes a dropped file's path beside its placeholder in the stored row.
-    .replace(/\[Image: source: [^\]\n]*\]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-const sameText = (a: string, b: string) => promptWords(a) === promptWords(b)
-/**
- * Whether a transcript row is the stored row: the row's id is the stored
- * uuid with its last group zeroed (`…-8c48-000000000000`), or the uuid itself.
- */
-const sameRow = (requestId: string, messageId: string | undefined) =>
-  messageId !== undefined &&
-  (requestId === messageId || (/-0{12}$/.test(requestId) && requestId.slice(0, 24) === messageId.slice(0, 24)))
-const isDraft = (img: PeekImage) => img.messageId === undefined && img.promptText === undefined
-const latest = (list: readonly PeekImage[], n: number) =>
-  list.filter(img => img.n === n).sort((a, b) => b.addedAt - a.addedAt)[0]
-const capped = (list: PeekImage[]) => list.sort((a, b) => a.addedAt - b.addedAt).slice(-MAX_KEPT)
 
 async function probe($: $, label: string, data: unknown) {
   const isOn = await read($, isDebug)
@@ -344,7 +334,7 @@ async function captureDraft($: $, options: PluginOptions, born: number, ns: numb
     let id = ''
     try {
       id = `draft-${n}-${await uniqueStamp($)}`
-      if ((await read($, images)).some(img => isDraft(img) && img.n === n)) continue
+      if (hasDraft(await read($, images), n)) continue
       let file = files[i]
       let source: PeekSource = 'file'
       if (!file) {
@@ -396,7 +386,7 @@ async function captureDraft($: $, options: PluginOptions, born: number, ns: numb
       if (!entry) continue
       // The draft may have been sent or edited while the picture was made.
       if (born !== generation || !(await $.prompt.read()).text.includes(`[Image #${n}]`)) continue
-      isKept = await setImages($, born, list => [...list.filter(img => !(isDraft(img) && img.n === n)), entry])
+      isKept = await setImages($, born, list => addDraft(list, entry))
       if (!isKept) continue
       await warm($, options, entry)
       if (options.autoOpenPane === true && isFullscreen === true && !isPaneOffered) {
@@ -416,26 +406,12 @@ async function keepPrompt(
   options: PluginOptions,
   born: number,
   content: readonly ApiContentBlock[],
-  where: { messageId?: string; idPrefix: string; source: PeekSource; occurrence?: number },
+  where: { messageId?: string; idPrefix: string; source: PeekSource },
 ) {
   const blocks = content.filter(b => b.type === 'image')
   if (blocks.length === 0) return
-  const text = promptWords(
-    content
-      .filter(b => b.type === 'text')
-      .map(b => String(b.text ?? ''))
-      .join('\n'),
-  )
+  const text = textOf(content)
   const named = placeholders(text)
-  const before = await read($, images)
-  if (where.source === 'history') {
-    // Already read back on an earlier load, or kept when it was sent: the
-    // n-th row of a text is known once n rows of that text were sent here.
-    const sentRows = new Set(
-      before.filter(img => img.source === 'sent' && img.promptText !== undefined && sameText(img.promptText, text)).map(img => img.messageId),
-    )
-    if (before.some(img => img.id.startsWith(`${where.idPrefix}-`)) || sentRows.size > (where.occurrence ?? 0)) return
-  }
   const h = await host($)
   await ensureDir($, h)
 
@@ -460,15 +436,7 @@ async function keepPrompt(
   }
   void probe($, where.source, { messageId: where.messageId, named, kept: kept.length, chars: text.length })
   if (kept.length === 0) return
-  // Replaces what the draft held for this prompt (tagged with its text at
-  // submit) and any earlier copy of this row; a draft of the next prompt stays.
-  const isMade = await setImages($, born, list => [
-    ...list.filter(img => {
-      if (where.messageId !== undefined && img.messageId === where.messageId) return false
-      return !(img.messageId === undefined && img.source !== 'history' && img.promptText !== undefined && sameText(img.promptText, text))
-    }),
-    ...kept,
-  ])
+  const isMade = await setImages($, born, list => storePrompt(list, kept, { messageId: where.messageId, text }))
   if (!isMade) return drop()
   for (const img of kept) await warm($, options, img)
 }
@@ -477,19 +445,12 @@ async function keepPrompt(
 async function loadHistory($: $, options: PluginOptions, born: number) {
   const messages = await $.session.messages({ as: 'api' })
   if ('deny' in messages) return
-  const withImages = messages
-    .map((m, index) => ({ m, index }))
-    .filter(({ m }) => m.role === 'user' && m.content.some(b => b.type === 'image') && !m.content.some(b => b.type === 'tool_result'))
+  const rows = messages
+    .map((m, index) => ({ content: m.content, idPrefix: `hist-${index}`, isPrompt: m.role === 'user' }))
+    .filter(row => row.isPrompt && row.content.some(b => b.type === 'image') && !row.content.some(b => b.type === 'tool_result'))
     .slice(-MAX_KEPT)
-  const seen = new Map<string, number>()
-  for (const { m, index } of withImages) {
-    const text = m.content
-      .filter(b => b.type === 'text')
-      .map(b => String(b.text ?? '').replace(/\s+/g, ' ').trim())
-      .join(' ')
-    const occurrence = seen.get(text) ?? 0
-    seen.set(text, occurrence + 1)
-    await keepPrompt($, options, born, m.content, { idPrefix: `hist-${index}`, source: 'history', occurrence })
+  for (const row of unread(await read($, images), rows)) {
+    await keepPrompt($, options, born, row.content, { idPrefix: row.idPrefix, source: 'history' })
   }
 }
 
@@ -603,7 +564,7 @@ export const register: Register = (on, options) => {
     }
     const removed = before.filter(n => !after.includes(n))
     if (removed.length > 0) {
-      later($, 'prune', born => setImages($, born, list => list.filter(img => !(isDraft(img) && removed.includes(img.n)))))
+      later($, 'prune', born => setImages($, born, list => dropDrafts(list, n => removed.includes(n))))
     }
     return box
   }).catch(($, e, next) => next(e))
@@ -614,11 +575,11 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     const present = placeholders(e.text)
     if (e.origin.kind === 'clear') {
-      later($, 'prune', born => setImages($, born, list => list.filter(img => !(isDraft(img) && !present.includes(img.n)))))
+      later($, 'prune', born => setImages($, born, list => dropDrafts(list, n => !present.includes(n))))
     } else if (present.length > 0 && e.origin.kind !== 'history') {
       void probe($, 'prompt.change', { origin: e.origin.kind, present })
       const list = await read($, images)
-      const missing = present.filter(n => !list.some(img => isDraft(img) && img.n === n))
+      const missing = present.filter(n => !hasDraft(list, n))
       if (missing.length > 0) {
         const at = await $.clock.now()
         const paths = recentPaths.splice(0).filter(p => at - p.at < 3_000).map(p => p.path)
@@ -639,10 +600,7 @@ export const register: Register = (on, options) => {
         chars: e.text.length,
         attachments: attached.map(a => a.mediaType),
       })
-      const named = placeholders(e.text)
-      await setImages($, generation, list =>
-        list.map(img => (isDraft(img) && (named.length === 0 || named.includes(img.n)) ? { ...img, promptText: e.text } : img)),
-      )
+      await setImages($, generation, list => tagDrafts(list, e.text))
     }
     return result
   }).catch(($, e, next) => next(e))
@@ -665,14 +623,12 @@ export const register: Register = (on, options) => {
     if (e.viewport?.isFullscreen !== undefined) isFullscreen = e.viewport.isFullscreen
     if (e.props.hasSurvey) return next(e)
     const list = await read($, images)
-    const drafts = list.filter(isDraft).sort((a, b) => a.n - b.n)
+    const inPrompt = drafts(list)
     const canHover = e.surface === 'terminal' && isFullscreen === true
     // Pictures hidden until a chip is hovered: the draft's chips here, and
     // the sent ones' chips in the transcript.
-    const hovered = canHover
-      ? [...drafts, ...list.filter(img => !isDraft(img)).sort((a, b) => b.addedAt - a.addedAt).slice(0, 12)]
-      : []
-    if (drafts.length === 0 && hovered.length === 0) return next(e)
+    const hovered = canHover ? [...inPrompt, ...sent(list)] : []
+    if (inPrompt.length === 0 && hovered.length === 0) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     const label = (img: PeekImage) => (
       <Button key={`draft-${img.id}`} plain onPress={() => select($, img)}>
@@ -682,7 +638,7 @@ export const register: Register = (on, options) => {
     if (e.surface !== 'terminal') {
       return (
         <Box flexDirection="row" gap={2}>
-          {drafts.map(label)}
+          {inPrompt.map(label)}
         </Box>
       )
     }
@@ -690,7 +646,7 @@ export const register: Register = (on, options) => {
     // scrolls, and the chips go out from under the pointer, the hover stuck.
     // With too little room (a small window, a tall prompt, a turn running)
     // a one-line hint stands in for a picture too small to see.
-    const room = e.props.maxRows - (drafts.length > 0 ? 1 : 0)
+    const room = e.props.maxRows - (inPrompt.length > 0 ? 1 : 0)
     const bigRows = room - 1
     const hasRoom = bigRows >= MIN_CARD_ROWS
     const previews = hasRoom
@@ -698,7 +654,7 @@ export const register: Register = (on, options) => {
       : []
     // With no pointer (the main screen) the draft's thumbnails show outright.
     const rows = Math.max(2, Math.min(INLINE.rows, e.props.maxRows - 1))
-    const pics = canHover ? [] : await Promise.all(drafts.map(img => picture($, e, options, img, 'inline', INLINE.columns, rows)))
+    const pics = canHover ? [] : await Promise.all(inPrompt.map(img => picture($, e, options, img, 'inline', INLINE.columns, rows)))
     return (
       <Box flexDirection="column">
         {room >= 1 &&
@@ -711,9 +667,9 @@ export const register: Register = (on, options) => {
               {hasRoom && previews[i]}
             </Box>
           ))}
-        {drafts.length > 0 && (
+        {inPrompt.length > 0 && (
           <Box flexDirection="row" gap={canHover ? 2 : 3}>
-            {drafts.map((img, i) =>
+            {inPrompt.map((img, i) =>
               canHover ? (
                 <Box key={`band-${img.id}`} hover={{ scope: scopeOf(img) }}>
                   {label(img)}
@@ -738,13 +694,9 @@ export const register: Register = (on, options) => {
     if (e.viewport?.isFullscreen !== undefined) isFullscreen = e.viewport.isFullscreen
     if (!e.props.text.includes('[Image #')) return next(e)
     const list = await read($, images)
-    const byId = list.filter(img => sameRow(e.requestId, img.messageId))
-    const byText = list.filter(img => img.promptText !== undefined && sameText(img.promptText, e.props.text))
-    // One picture per number: equal prompt texts share their newest pictures.
-    const mine = [...new Map((byId.length > 0 ? byId : byText).sort((a, b) => a.addedAt - b.addedAt).map(img => [img.n, img])).values()]
-      .sort((a, b) => a.n - b.n)
+    const mine = forRow(list, e.requestId, e.props.text)
     if (await read($, isDebug)) {
-      void probe($, 'UserMessage', { requestId: e.requestId, byId: byId.length, matched: mine.length, ids: list.map(img => img.messageId) })
+      void probe($, 'UserMessage', { requestId: e.requestId, matched: mine.length, ids: list.map(img => img.messageId) })
     }
     if (mine.length === 0) return next(e)
 
@@ -839,11 +791,6 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const inPrompt = list.filter(img => img.messageId === undefined && img.source !== 'history')
-    const sent = list
-      .filter(img => !inPrompt.includes(img))
-      .sort((a, b) => b.addedAt - a.addedAt)
-      .slice(0, 12)
     const section = async (title: string, items: PeekImage[]) => {
       if (items.length === 0) return []
       const pics = e.surface === 'terminal' ? await Promise.all(items.map(img => picture($, e, options, img, 'pane', columns, 10))) : []
@@ -867,8 +814,8 @@ export const register: Register = (on, options) => {
           {closeButton}
           <Text dimColor>{keysHint}</Text>
         </Box>
-        {await section('In your prompt', inPrompt)}
-        {await section('Sent', sent)}
+        {await section('In your prompt', drafts(list))}
+        {await section('Sent', sent(list))}
       </Box>
     )
   })
