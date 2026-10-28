@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { ApiContentBlock, EngineInterface, PluginOptions, Register, RenderElement, RenderInput } from 'claude-code'
+import type { ApiContentBlock, EngineInterface, PluginOptions, Register } from 'claude-code'
 
 import type { PeekImage, PeekSource } from '../types'
 import {
@@ -18,11 +18,9 @@ import {
   removeDir,
   removeFiles,
   sweepStale,
-  toBmp,
   toPng,
   writeBase64,
 } from './host'
-import { Lru } from './cache'
 import type { Host } from './host'
 import {
   MAX_KEPT,
@@ -40,38 +38,22 @@ import {
   textOf,
   unread,
 } from './list'
-import { bmpToCells } from './raster'
+import { INLINE, draw, forget, graphics, warm } from './picture'
+import { generation, isDebugOn, isFullscreen, later, nextGeneration, noteViewport, probe, toggleDebug } from './session'
 
 type $ = EngineInterface
-type Mode = 'file' | 'bytes' | 'blocks' | 'off'
-type View = 'inline' | 'card' | 'pane' | 'big'
 
 const PANE = 'image-peek'
-const MAX_BYTES = 2 * 1024 * 1024
-// The fixed boxes thumbnails are drawn in: inline under a message on the main
-// screen, and the hover card in the fullscreen layout.
-const INLINE = { columns: 28, rows: 8 }
-/** Fewest rows a hover preview is drawn in; with fewer the band shows a hint. */
-const MIN_CARD_ROWS = 6
-const CARD = { columns: 100, rows: 24 }
 
 // Change the tag when PeekImage's fields change: values an earlier version
 // stored outlive a reload, and are read as absent under another tag.
 const images = atom({ plugin: 'image-peek', key: 'images' } as const, [], { shape: 'images-2' })
 const selected = atom({ plugin: 'image-peek', key: 'selected' } as const, null)
-const isDebug = atom({ plugin: 'image-peek', key: 'isDebug' } as const, false)
+/** Fewest rows a hover preview is drawn in; with fewer the band shows a hint. */
+const MIN_CARD_ROWS = 6
 
 // Module state: rebuilt after a reload, and nothing drawn depends on it alone.
-let isFullscreen: boolean | undefined
-/**
- * Bumped when the session's pictures are dropped (a session end, /clear,
- * /resume, /peek clear): work scheduled before then finds it moved and stops
- * before it writes a file or the list.
- */
-let generation = 0
-let isTmux = false
 let isPaneOffered = false
-let mode: Mode | undefined
 /** The clipboard's change counter at the last grab: unchanged means no new image was copied. */
 let lastChange: number | undefined
 const inFlight = new Set<number>()
@@ -80,47 +62,9 @@ const recentPaths: { path: string; at: number }[] = []
 /** Screenshots already taken for a draft, so a second placeholder gets the next one. */
 const usedShots = new Set<string>()
 let isDeniedTold = false
-/** The block preview's largest size (Raster takes up to 512 x 256): each cell is a palette entry to paint. */
-const RASTER = { columns: 160, rows: 80 }
-// Bounded by size, least recently used out: a dropped entry is only read or
-// made again. 32M base64 chars hold the band's dozen previews even at the
-// 2 MiB cap. The cells' budget is three of the largest views for every kept
-// image plus one: the sizes on screen at once (inline, card, band, the pane's
-// list and its big view) weigh less, so making one never evicts another still
-// drawn (a loop of make, redraw, make). Only sizes left by a resize age out.
-const CELL_CHARS = (RASTER.columns * RASTER.rows * 12 * 4) / 3
-const pngCache = new Lru<string | null>(32 * 1024 * 1024, value => value?.length ?? 0)
-const cellCache = new Lru<string | null>((MAX_KEPT * 3 + 1) * CELL_CHARS, value => value?.length ?? 0)
-/** Cells being made, by key: the drawing and `warm` share one job, and so one BMP file. */
-const cellJobs = new Map<string, Promise<void>>()
-/** Keys a drawing waits on, until their cells are in; a new generation drops its waiters unrun, so it clears these. */
-const cellAsked = new Set<string>()
-
-function nextGeneration() {
-  generation++
-  cellAsked.clear()
-}
 
 /** The hover group that ties a message's chip to its preview in the band. */
 const scopeOf = (img: PeekImage) => `peek-${img.id}`.slice(0, 64)
-
-async function probe($: $, label: string, data: unknown) {
-  const isOn = await read($, isDebug)
-  $.ui.log(`[image-peek] ${label} ${JSON.stringify(data)}`, { to: isOn ? 'transcript' : 'debug' })
-}
-
-/**
- * Runs work after the hook that asked for it has answered: the reference puts
- * work that outlives a dispatch on `$.clock`, never on the dispatch itself.
- */
-function later($: $, label: string, work: (born: number) => Promise<unknown>, ms = 0) {
-  const born = generation
-  $.clock.after(ms, () => {
-    if (born !== generation) return
-    // The error's name only: its message may hold a file path.
-    work(born).catch(error => probe($, `${label} failed`, error instanceof Error ? error.name : typeof error))
-  })
-}
 
 let stamps = 0
 /** A file-name stamp no other capture or copy shares, even in the same millisecond. */
@@ -135,13 +79,13 @@ const fileName = (path: string) => path.slice(Math.max(path.lastIndexOf('/'), pa
  * False when a newer generation came first: the change was not made.
  */
 async function setImages($: $, born: number, change: (list: PeekImage[]) => PeekImage[]) {
-  if (born !== generation) return false
+  if (born !== generation()) return false
   let isMade = false
   let dropped: PeekImage[] = []
   await update($, images, list => {
     // Checked on every run: an update can run again after a /peek clear that
     // came in the meantime, and must not bring old pictures back.
-    isMade = born === generation
+    isMade = born === generation()
     if (!isMade) {
       dropped = []
       return list
@@ -151,123 +95,10 @@ async function setImages($: $, born: number, change: (list: PeekImage[]) => Peek
     return next
   })
   if (dropped.length === 0) return isMade
-  for (const img of dropped) {
-    pngCache.delete(img.thumb)
-    pngCache.delete(img.small)
-    cellCache.deleteWhere(key => key.startsWith(`${img.small}|`))
-  }
+  for (const img of dropped) forget(img)
   const h = await host($)
   await removeFiles($, h, dropped.map(img => img.id), dropped.map(img => fileName(img.path)))
   return isMade
-}
-
-/** How this terminal can show a picture: the setting, else a guess from its env. */
-async function graphics($: $, options: PluginOptions): Promise<Mode> {
-  if (mode) return mode
-  isTmux = Boolean(await $.env.get('TMUX'))
-  const pick = String(options.graphics ?? 'auto')
-  if (pick === 'file' || pick === 'bytes' || pick === 'blocks' || pick === 'off') {
-    mode = pick
-    return mode
-  }
-  const env = {
-    TERM_PROGRAM: await $.env.get('TERM_PROGRAM'),
-    TERM: await $.env.get('TERM'),
-    LC_TERMINAL: await $.env.get('LC_TERMINAL'),
-    KITTY_WINDOW_ID: await $.env.get('KITTY_WINDOW_ID'),
-    GHOSTTY_RESOURCES_DIR: await $.env.get('GHOSTTY_RESOURCES_DIR'),
-    TMUX: isTmux,
-  }
-  const name = `${env.TERM_PROGRAM ?? ''} ${env.TERM ?? ''}`
-  // tmux passes bytes through (with allow-passthrough and focus-events on), never a file name.
-  mode = isTmux
-    ? 'bytes'
-    : env.KITTY_WINDOW_ID || env.GHOSTTY_RESOURCES_DIR || /ghostty|kitty/i.test(name)
-      ? 'file'
-      : env.TERM_PROGRAM === 'iTerm.app' || env.LC_TERMINAL === 'iTerm2'
-        ? 'bytes'
-        : 'blocks'
-  void probe($, 'graphics', { mode, ...env, KITTY_WINDOW_ID: Boolean(env.KITTY_WINDOW_ID), GHOSTTY_RESOURCES_DIR: Boolean(env.GHOSTTY_RESOURCES_DIR) })
-  return mode
-}
-
-/**
- * How a picture is drawn in a given view. iTerm2 draws bytes only under the
- * fullscreen layout (tmux in either), so its main-screen thumbnails are blocks.
- */
-function drawAs(how: Mode, view: View): Mode {
-  if (how === 'bytes' && view === 'inline' && isFullscreen !== true && !isTmux) return 'blocks'
-  return how
-}
-
-/** Cells a picture takes at most `columns` x `rows`, keeping its shape (a cell is about twice as tall as wide). */
-function fit(img: PeekImage, columns: number, rows: number) {
-  const aspect = img.width > 0 && img.height > 0 ? img.height / img.width : 0.6
-  let c = Math.max(1, Math.min(255, Math.floor(columns)))
-  let r = Math.max(1, Math.round((c * aspect) / 2))
-  if (r > rows) {
-    r = Math.max(1, Math.min(255, Math.floor(rows)))
-    c = Math.max(1, Math.min(255, Math.round((r * 2) / aspect)))
-  }
-  return { columns: c, rows: r }
-}
-
-const rasterSize = (size: { columns: number; rows: number }) => ({
-  columns: Math.min(size.columns, RASTER.columns),
-  rows: Math.min(size.rows, RASTER.rows),
-})
-
-const cellKey = (img: PeekImage, size: { columns: number; rows: number }) => `${img.small}|${size.columns}x${size.rows}`
-
-/** Makes the half-block cells for one size; a process runs, so never while drawing. */
-function makeCells($: $, img: PeekImage, size: { columns: number; rows: number }) {
-  const key = cellKey(img, size)
-  if (cellCache.has(key)) return Promise.resolve()
-  let job = cellJobs.get(key)
-  if (!job) {
-    job = convertCells($, img, size, key).finally(() => cellJobs.delete(key))
-    cellJobs.set(key, job)
-  }
-  return job
-}
-
-async function convertCells($: $, img: PeekImage, size: { columns: number; rows: number }, key: string) {
-  const h = await host($)
-  const bmp = join(h, `${img.id}-${size.columns}x${size.rows}.bmp`)
-  const ok = await toBmp($, h, img.small, bmp, size.columns, size.rows * 2)
-  const { base64 } = ok ? await $.fs.read(bmp, { as: 'bytes' }).catch(() => ({ base64: '' })) : { base64: '' }
-  // The cells are all that's kept; each window size would leave a BMP behind.
-  await removeFiles($, h, [], [`${img.id}-${size.columns}x${size.rows}.bmp`])
-  // Dropped while its cells were made: keep nothing for a picture that's gone.
-  if (!(await read($, images)).some(kept => kept.small === img.small)) return
-  cellCache.set(key, base64 ? (bmpToCells(base64, size.columns, size.rows) ?? null) : null)
-}
-
-/** Cells for a size, or undefined while they are made off the drawing; the drawing comes again once they are. */
-function cells($: $, img: PeekImage, size: { columns: number; rows: number }) {
-  const key = cellKey(img, size)
-  if (cellCache.has(key)) return cellCache.get(key) ?? undefined
-  // One waiter per key, even when `warm` already started the job: it
-  // redraws once the cells are in.
-  if (!cellAsked.has(key)) {
-    cellAsked.add(key)
-    later($, 'cells', async () => {
-      try {
-        await makeCells($, img, size)
-      } finally {
-        cellAsked.delete(key)
-      }
-      $.ui.invalidate('ui.render')
-    })
-  }
-  return undefined
-}
-
-/** Makes ahead the cells of the fixed views, so a message row draws blocks at once. */
-async function warm($: $, options: PluginOptions, img: PeekImage) {
-  const how = await graphics($, options)
-  if (how === 'blocks' || how === 'bytes') await makeCells($, img, rasterSize(fit(img, INLINE.columns, INLINE.rows)))
-  if (how === 'blocks') await makeCells($, img, rasterSize(fit(img, CARD.columns, CARD.rows)))
 }
 
 /** Makes the PNG and its two thumbnails, and reads the thumbnail's size. */
@@ -317,7 +148,7 @@ async function captureDraft($: $, options: PluginOptions, born: number, ns: numb
   const h = await host($)
   // The copies a drop made that no placeholder here takes.
   const unused = (from: number) => removeFiles($, h, [], files.slice(from).map(fileName))
-  if (born !== generation) return unused(0)
+  if (born !== generation()) return unused(0)
   await ensureDir($, h)
   await unused(ns.length)
   for (const [i, n] of ns.entries()) {
@@ -382,14 +213,14 @@ async function captureDraft($: $, options: PluginOptions, born: number, ns: numb
         $.ui.toast(`Image #${n}: it will show once sent.`)
         continue
       }
-      const entry = born === generation ? await finish($, h, { id, n, source, file }) : undefined
+      const entry = born === generation() ? await finish($, h, { id, n, source, file }) : undefined
       if (!entry) continue
       // The draft may have been sent or edited while the picture was made.
-      if (born !== generation || !(await $.prompt.read()).text.includes(`[Image #${n}]`)) continue
+      if (born !== generation() || !(await $.prompt.read()).text.includes(`[Image #${n}]`)) continue
       isKept = await setImages($, born, list => addDraft(list, entry))
       if (!isKept) continue
       await warm($, options, entry)
-      if (options.autoOpenPane === true && isFullscreen === true && !isPaneOffered) {
+      if (options.autoOpenPane === true && isFullscreen() && !isPaneOffered) {
         isPaneOffered = true
         await $.ui.open({ id: PANE, title: 'Images' })
       }
@@ -419,7 +250,7 @@ async function keepPrompt(
   // Pictures made for a list a /peek clear or a switch got to first.
   const drop = () => removeFiles($, h, kept.map(img => img.id), kept.map(img => fileName(img.path)))
   for (const [i, block] of blocks.entries()) {
-    if (born !== generation) return drop()
+    if (born !== generation()) return drop()
     const source = block.source as { type?: string; media_type?: string; data?: string } | undefined
     if (source?.type !== 'base64' || typeof source.data !== 'string') continue
     const n = named[i] ?? i + 1
@@ -452,43 +283,6 @@ async function loadHistory($: $, options: PluginOptions, born: number) {
   for (const row of unread(await read($, images), rows)) {
     await keepPrompt($, options, born, row.content, { idPrefix: row.idPrefix, source: 'history' })
   }
-}
-
-async function pngBytes($: $, path: string) {
-  if (!pngCache.has(path)) {
-    const { base64 } = await $.fs.read(path, { as: 'bytes' }).catch(() => ({ base64: '' }))
-    pngCache.set(path, base64 && (base64.length * 3) / 4 <= MAX_BYTES ? base64 : null)
-  }
-  return pngCache.get(path) ?? undefined
-}
-
-/** One picture at most `columns` x `rows` cells, drawn the way this terminal can; no process runs here. */
-async function picture(
-  $: $,
-  e: RenderInput<'UserMessage' | 'Pane' | 'AbovePrompt', 'terminal'>,
-  options: PluginOptions,
-  img: PeekImage,
-  view: View,
-  columns: number,
-  rows: number,
-): Promise<RenderElement> {
-  const { Image, Raster, Text } = $.ui.resolve(e)
-  const size = fit(img, columns, rows)
-  const alt = `Image ${img.n}`
-  const file = view === 'inline' ? img.small : img.thumb
-  const how = drawAs(await graphics($, options), view)
-  if (how === 'file') return <Image key={`img-${img.id}-${view}`} source={{ file, format: 'png' }} {...size} alt={alt} />
-  if (how === 'bytes') {
-    const png = await pngBytes($, file)
-    if (png) return <Image key={`img-${img.id}-${view}`} source={{ png }} {...size} alt={alt} />
-  }
-  if (how === 'blocks' || how === 'bytes') {
-    const box = rasterSize(size)
-    const packed = cells($, img, box)
-    if (packed) return <Raster key={`ras-${img.id}-${view}`} {...box} cells={packed} />
-    return <Text dimColor>[{alt}…]</Text>
-  }
-  return <Text dimColor>[{alt}: /peek open {img.n}]</Text>
 }
 
 /** Opens the pane the person asked for: it takes the keys, and Escape closes it. */
@@ -600,7 +394,7 @@ export const register: Register = (on, options) => {
         chars: e.text.length,
         attachments: attached.map(a => a.mediaType),
       })
-      await setImages($, generation, list => tagDrafts(list, e.text))
+      await setImages($, generation(), list => tagDrafts(list, e.text))
     }
     return result
   }).catch(($, e, next) => next(e))
@@ -620,11 +414,11 @@ export const register: Register = (on, options) => {
   // The band above the prompt: a thumbnail for each image in the draft, so a
   // paste shows at once where you type. A click shows it big in the pane.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.viewport?.isFullscreen !== undefined) isFullscreen = e.viewport.isFullscreen
+    noteViewport(e.viewport)
     if (e.props.hasSurvey) return next(e)
     const list = await read($, images)
     const inPrompt = drafts(list)
-    const canHover = e.surface === 'terminal' && isFullscreen === true
+    const canHover = e.surface === 'terminal' && isFullscreen()
     // Pictures hidden until a chip is hovered: the draft's chips here, and
     // the sent ones' chips in the transcript.
     const hovered = canHover ? [...inPrompt, ...sent(list)] : []
@@ -650,11 +444,11 @@ export const register: Register = (on, options) => {
     const bigRows = room - 1
     const hasRoom = bigRows >= MIN_CARD_ROWS
     const previews = hasRoom
-      ? await Promise.all(hovered.map(img => picture($, e, options, img, 'card', e.props.bodyColumns - 2, bigRows)))
+      ? await Promise.all(hovered.map(img => draw($, e, options, img, 'card', e.props.bodyColumns - 2, bigRows)))
       : []
     // With no pointer (the main screen) the draft's thumbnails show outright.
     const rows = Math.max(2, Math.min(INLINE.rows, e.props.maxRows - 1))
-    const pics = canHover ? [] : await Promise.all(inPrompt.map(img => picture($, e, options, img, 'inline', INLINE.columns, rows)))
+    const pics = canHover ? [] : await Promise.all(inPrompt.map(img => draw($, e, options, img, 'inline', INLINE.columns, rows)))
     return (
       <Box flexDirection="column">
         {room >= 1 &&
@@ -691,11 +485,11 @@ export const register: Register = (on, options) => {
   // chip shows the picture on hover and opens it in the pane on click; on the
   // main screen (no pointer) small thumbnails are drawn inline instead.
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
-    if (e.viewport?.isFullscreen !== undefined) isFullscreen = e.viewport.isFullscreen
+    noteViewport(e.viewport)
     if (!e.props.text.includes('[Image #')) return next(e)
     const list = await read($, images)
     const mine = forRow(list, e.requestId, e.props.text)
-    if (await read($, isDebug)) {
+    if (await isDebugOn($)) {
       void probe($, 'UserMessage', { requestId: e.requestId, matched: mine.length, ids: list.map(img => img.messageId) })
     }
     if (mine.length === 0) return next(e)
@@ -717,7 +511,7 @@ export const register: Register = (on, options) => {
 
     const { Box, Button, Text } = $.ui.resolve(e)
     if (e.viewport?.isFullscreen !== true) {
-      const thumbs = await Promise.all(mine.map(img => picture($, e, options, img, 'inline', INLINE.columns, INLINE.rows)))
+      const thumbs = await Promise.all(mine.map(img => draw($, e, options, img, 'inline', INLINE.columns, INLINE.rows)))
       return (
         <Box flexDirection="column">
           {own}
@@ -753,7 +547,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    if (e.viewport?.isFullscreen !== undefined) isFullscreen = e.viewport.isFullscreen
+    noteViewport(e.viewport)
     const { Box, Button, Text } = $.ui.resolve(e)
     const list = await read($, images)
     const selectedId = await read($, selected)
@@ -766,7 +560,7 @@ export const register: Register = (on, options) => {
     const keysHint = e.props.isFocused ? 'Esc closes' : 'click here to use keys'
 
     if (chosen) {
-      const big = e.surface === 'terminal' ? await picture($, e, options, chosen, 'big', columns, rows) : undefined
+      const big = e.surface === 'terminal' ? await draw($, e, options, chosen, 'big', columns, rows) : undefined
       return (
         <Box flexDirection="column">
           <Box flexDirection="row" gap={2}>
@@ -793,7 +587,7 @@ export const register: Register = (on, options) => {
 
     const section = async (title: string, items: PeekImage[]) => {
       if (items.length === 0) return []
-      const pics = e.surface === 'terminal' ? await Promise.all(items.map(img => picture($, e, options, img, 'pane', columns, 10))) : []
+      const pics = e.surface === 'terminal' ? await Promise.all(items.map(img => draw($, e, options, img, 'pane', columns, 10))) : []
       return [
         <Text key={`title-${title}`} bold>
           {title}
@@ -823,13 +617,12 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'peek' }, async ($, e) => {
     const [first, second] = e.args.trim().split(/\s+/).filter(Boolean)
     if (first === 'debug') {
-      const isOn = !(await read($, isDebug))
-      await update($, isDebug, () => isOn)
+      const isOn = await toggleDebug($)
       return { text: `Debug lines ${isOn ? 'shown in the transcript' : 'in the debug log only'}.` }
     }
     if (first === 'clear') {
       nextGeneration()
-      await setImages($, generation, () => [])
+      await setImages($, generation(), () => [])
       await update($, selected, () => null)
       return { text: 'Image list cleared.' }
     }

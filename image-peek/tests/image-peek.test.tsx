@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
 import type { PeekImage } from '../types'
@@ -377,4 +377,62 @@ test('a resumed row is read back unless this session sent as many rows of its te
   expect(unread([sentOnce], [row(2, 'a'), row(7, 'b')]).map(r => r.idPrefix)).toEqual(['hist-7'])
   // A row read back on an earlier load is not read again.
   expect(unread([{ ...SHOT, id: 'hist-7-1' }], [row(7, 'b')])).toEqual([])
+})
+
+// A 1 x 2 BMP, red over blue: every cell it is scaled to reads red on top, blue below.
+const tinyBmp = () => {
+  const bmp = new Uint8Array(54 + 8)
+  const view = new DataView(bmp.buffer)
+  bmp[0] = 0x42
+  bmp[1] = 0x4d
+  view.setUint32(10, 54, true)
+  view.setUint32(14, 40, true)
+  view.setInt32(18, 1, true)
+  view.setInt32(22, 2, true)
+  view.setUint16(28, 24, true)
+  bmp.set(Uint8Array.of(0xff, 0, 0, 0, 0, 0, 0xff, 0), 54)
+  return toBase64(bmp)
+}
+
+test('blocks: a sent picture draws a placeholder, then its cells once made off the drawing', { options: { graphics: 'blocks' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const runs: string[] = []
+  on('state.get', seed({ images: [SHOT], isDebug: false }))
+  on('env.get', noEnv)
+  on('process.run', (_, e) => {
+    runs.push(e.argv[0]!)
+    return { value: { exitCode: 0, stdout: e.argv[0] === 'uname' ? 'Darwin 25.0.0' : '', stderr: '' } }
+  })
+  on('fs.read', () => ({ value: { base64: tinyBmp() } }))
+  on('fs.list', () => ({ value: [] }))
+  on('session.id', () => ({ value: 'test-session' }))
+  const logs: string[] = []
+  on('ui.log', (_, e) => {
+    logs.push(JSON.stringify(e))
+    return { value: undefined }
+  })
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+
+  const row = await $.ui.mount({
+    plugin: 'image-peek',
+    surface: 'terminal',
+    component: 'UserMessage',
+    requestId: 'msg-1',
+    viewport: { columns: 100, rows: 40, isFullscreen: false },
+    props: { text: 'fix the margin in [Image #1]', origin: { kind: 'composer' }, isExpanded: false },
+  })
+  // No process runs while drawing: the first drawing holds a placeholder.
+  expect(await row.find({ type: 'Raster' })).toBeUndefined()
+  expect(await row.find({ type: 'Text', text: /\[Image 1…\]/ })).toBeDefined()
+
+  await clock.settle()
+  const raster = await row.find({ type: 'Raster' })
+  // 800 x 400 in the 28 x 8 inline box: 28 columns, 7 rows of cells.
+  expect(logs).toEqual([])
+  expect([raster?.props.columns, raster?.props.rows]).toEqual([28, 7])
+  expect(runs).toContain('sips')
+  await row.unmount()
 })
