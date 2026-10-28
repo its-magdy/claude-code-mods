@@ -10,9 +10,9 @@ import type { PeekImage, PeekSource } from '../types'
 import { copyFile, ensureDir, grabClipboard, host, isImageFile, linuxPath, recentScreenshot } from './host'
 import { addDraft, hasDraft } from './list'
 import { forget, warm } from './picture'
-import { claim, finish, isLive, keep, pictures } from './pictures'
+import { claim, finish, isLive, keep, later, pictures } from './pictures'
 import type { Work } from './pictures'
-import { PANE, isFullscreen, later, probe } from './session'
+import { PANE, isFullscreen, probe } from './session'
 
 type $ = EngineInterface
 

@@ -19,9 +19,9 @@ import {
   unread,
 } from './list'
 import { INLINE, draw, forget, graphics, warm } from './picture'
-import { begin, claim, finish, isLive, keep, pictures, reset } from './pictures'
+import { claim, finish, isLive, keep, later, pictures, reset, run } from './pictures'
 import type { Work } from './pictures'
-import { PANE, isDebugOn, isFullscreen, later, noteViewport, probe, toggleDebug } from './session'
+import { PANE, isDebugOn, isFullscreen, noteViewport, probe, toggleDebug } from './session'
 
 type $ = EngineInterface
 
@@ -194,7 +194,7 @@ export const register: Register = (on, options) => {
         chars: e.text.length,
         attachments: attached.map(a => a.mediaType),
       })
-      await setImages($, begin(), list => tagDrafts(list, e.text))
+      await run($, work => setImages($, work, list => tagDrafts(list, e.text)))
     }
     return result
   }).catch(($, e, next) => next(e))
