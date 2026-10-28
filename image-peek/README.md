@@ -2,7 +2,7 @@
 
 When you paste an image into Claude Code it shows up as `[Image #1]`. This mod lets you see it.
 
-- **While you type:** a band right above the prompt shows a thumbnail for each `[Image #N]` in your draft (click one to see it big). `/peek` opens the **Images** pane beside the chat.
+- **While you type:** a band right above the prompt shows a `▣ Image N` chip for each `[Image #N]` in your draft: hover over it to see the image in the fullscreen layout, while the main screen draws a thumbnail under each chip. Click a chip to see it big. `/peek` opens the **Images** pane beside the chat.
 - **On sent messages:** each image gets a `▣ Image N` chip under your message. In the fullscreen layout, hover over it to see the image and click to open it in the pane. On the main screen, small thumbnails are drawn inline instead.
 - **Old chats:** when you resume a session, its images are read back from the conversation, so the chips work there too.
 - **`/peek`** opens the pane, **`/peek N`** shows image N big (in your system viewer when drawing is `off`), **`/peek open N`** opens it in your system viewer (Preview on macOS), **`/peek clear`** empties the list, **`/peek debug`** turns the mod's probe lines in the transcript on or off.
@@ -68,7 +68,7 @@ Both are in `/config`:
 
 ## Permissions and privacy
 
-- It reads your clipboard only when an `[Image #N]` appears in the prompt, and copies a file only when a paste names one.
+- It reads your clipboard only when an `[Image #N]` appears in the prompt, and copies a file only when a paste names one or, on macOS, when it picks up a recent screenshot (below).
 - On macOS, when the clipboard has no new image, it looks for a screenshot taken in the last two minutes in your screenshot folder (Desktop unless you changed it) and macOS's temporary screenshot folder. That needs Full Disk Access for your terminal; without it nothing is read.
 - It runs these local commands, nothing else: `osascript`, `sips`, `open`, `defaults read com.apple.screencapture location` (macOS); `wl-paste` or `xclip`, ImageMagick (`magick`/`convert`), `xdg-open` (Linux); `powershell.exe`, `explorer.exe`, `wslpath` (Windows/WSL); and `uname`, `sh`, `cp`, `chmod`, `head`, `base64`, `rm` for its own folder.
 - The pictures stay on your machine in a folder only you can read, deleted when the session ends (on Windows, and anything left over, after a day).
