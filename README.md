@@ -62,6 +62,16 @@ Each mod's `plugin.json` carries a `version`. Installed copies update only
 when it changes, so bump it with every release you push (`0.1.0` → `0.1.1`).
 Keep the version in `plugin.json` only, never in `marketplace.json` too.
 
+In the same PR, add the version's entry to `<mod>/CHANGELOG.md`. Once it is
+merged, tag the merge commit and publish a release with that entry as notes:
+
+```bash
+git switch main && git pull
+git tag -a image-peek-v0.1.1 -m "image-peek 0.1.1"
+git push origin image-peek-v0.1.1
+gh release create image-peek-v0.1.1 --title "image-peek 0.1.1" --notes "<the CHANGELOG entry>"
+```
+
 ## Security
 
 Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
