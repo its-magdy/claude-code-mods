@@ -1,0 +1,47 @@
+name: release
+
+# Tags and publishes a release for each mod whose plugin.json version has no
+# <mod>-v<version> tag yet, with its CHANGELOG entry as the notes. Mods that
+# are already released are skipped, so re-running it is safe.
+on:
+  push:
+    branches: [main]
+    paths: ['*/.claude-plugin/plugin.json']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Release new versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898283+github-actions[bot]@users.noreply.github.com'
+          for manifest in */.claude-plugin/plugin.json; do
+            mod="${manifest%/.claude-plugin/plugin.json}"
+            version="$(node -p 'require(process.argv[1]).version' "$PWD/$manifest")"
+            tag="$mod-v$version"
+            if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+              echo "$tag already exists"
+              continue
+            fi
+            notes="$(.github/scripts/release-notes.sh "$mod")"
+            git tag -a "$tag" -m "$mod $version" "$GITHUB_SHA"
+            git push "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY" "refs/tags/$tag"
+            gh release create "$tag" --verify-tag --title "$mod $version" --notes "$notes"
+            echo "Released $tag" >> "$GITHUB_STEP_SUMMARY"
+          done

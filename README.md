@@ -62,15 +62,12 @@ Each mod's `plugin.json` carries a `version`. Installed copies update only
 when it changes, so bump it with every release you push (`0.1.0` → `0.1.1`).
 Keep the version in `plugin.json` only, never in `marketplace.json` too.
 
-In the same PR, add the version's entry to `<mod>/CHANGELOG.md`. Once it is
-merged, tag the merge commit and publish a release with that entry as notes:
-
-```bash
-git switch main && git pull
-git tag -a image-peek-v0.1.1 -m "image-peek 0.1.1"
-git push origin image-peek-v0.1.1
-gh release create image-peek-v0.1.1 --title "image-peek 0.1.1" --notes "<the CHANGELOG entry>"
-```
+In the same PR, add the version's entry to `<mod>/CHANGELOG.md` under a
+`## <version>` heading; `check` fails without it. Once the PR is merged,
+[`release.yml`](.github/workflows/release.yml) tags the merge commit
+`<mod>-v<version>` and publishes a release with that entry and the install
+command as notes. It skips versions that already have a tag, so you can re-run
+it from the Actions tab if a release fails.
 
 ## Security
 
