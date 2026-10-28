@@ -1,0 +1,23 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-code-mods",
+  "description": "Mohamed Omar's Claude Code mods: each one installs and turns on or off on its own.",
+  "owner": {
+    "name": "Mohamed Omar",
+    "url": "https://github.com/its-magdy"
+  },
+  "plugins": [
+    {
+      "name": "image-peek",
+      "source": "./image-peek",
+      "description": "See the images you paste instead of just [Image #N].",
+      "category": "productivity",
+      "tags": [
+        "images",
+        "screenshots",
+        "clipboard",
+        "terminal"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+.DS_Store
+*.log
+node_modules/
+# Written by Claude Code each time it loads a mod from its folder.
+**/.claude-plugin/types/
+**/.mcpb-cache/

@@ -1,0 +1,335 @@
+import { expect, test } from 'claude-code/testing'
+import type { TestBody } from 'claude-code/testing'
+
+import type { PeekImage } from '../types'
+import { toBase64 } from '../hooks/base64'
+import { Lru } from '../hooks/cache'
+import { imagePaths, writeBase64Command } from '../hooks/host'
+import { bmpToCells, readBmp } from '../hooks/raster'
+
+const SHOT: PeekImage = {
+  id: 'msg-1-1',
+  n: 1,
+  path: '/tmp/claude-image-peek/s/msg-1-1.png',
+  thumb: '/tmp/claude-image-peek/s/msg-1-1.thumb.png',
+  small: '/tmp/claude-image-peek/s/msg-1-1.small.png',
+  width: 800,
+  height: 400,
+  source: 'sent',
+  messageId: 'msg-1',
+  promptText: 'fix the margin in [Image #1]',
+  addedAt: 1,
+}
+
+// Stands in for the session's stored values: what an earlier event wrote.
+// `images` is kept with its shape tag, as the atom's `{ shape }` writes it.
+const seed = (values: { images?: PeekImage[]; isDebug?: boolean }) => (_: unknown, e: { key: string }) => ({
+  value: {
+    value: e.key === 'images' ? { shape: 'images-2', value: values.images ?? [] } : e.key === 'isDebug' ? values.isDebug : undefined,
+    version: 1,
+  },
+})
+
+test('paths a terminal types for a drop are read back', async () => {
+  expect(imagePaths('/Users/me/Desktop/Screenshot\\ 2026-10-25\\ at\\ 1.02.03\\ PM.png ')).toEqual([
+    '/Users/me/Desktop/Screenshot 2026-10-25 at 1.02.03 PM.png',
+  ])
+  expect(imagePaths("'/tmp/a b.JPG' /tmp/c.webp")).toEqual(['/tmp/a b.JPG', '/tmp/c.webp'])
+  expect(imagePaths('file:///tmp/x%20y.png')).toEqual(['/tmp/x y.png'])
+  expect(imagePaths('C:\\Users\\me\\shot.png')).toEqual(['C:\\Users\\me\\shot.png'])
+  expect(imagePaths('"C:\\Users\\me\\my shot.png"')).toEqual(['C:\\Users\\me\\my shot.png'])
+  expect(imagePaths('look at /tmp/notes.txt and fix it')).toEqual([])
+})
+
+test('the picture cache stays within its budget, least recently used out', async () => {
+  const cache = new Lru<string | null>(10, value => value?.length ?? 0)
+  cache.set('a', 'aaaa')
+  cache.set('b', 'bbbb')
+  cache.get('a') // a is now the most recent
+  cache.set('c', 'cccc') // 12 > 10: b goes, not a
+  expect([cache.has('a'), cache.has('b'), cache.has('c')]).toEqual([true, false, true])
+  expect(cache.weight).toBe(8)
+  cache.set('huge', 'x'.repeat(11)) // heavier than the whole budget: not kept, nothing evicted
+  expect([cache.has('huge'), cache.size]).toEqual([false, 2])
+  cache.set('miss', null) // a failed read is remembered and weighs one
+  expect([cache.has('miss'), cache.weight]).toEqual([true, 9])
+  cache.set('a', 'aa') // replacing re-weighs
+  expect(cache.weight).toBe(7)
+  cache.deleteWhere(key => key !== 'c')
+  expect([cache.size, cache.weight]).toEqual([1, 4])
+})
+
+test('a 24-bit bottom-up BMP becomes half-block cells', async () => {
+  // 1 x 2 pixels: red on top, blue below (rows stored bottom-up, padded to 4 bytes).
+  const header = new Uint8Array(54)
+  const view = new DataView(header.buffer)
+  header[0] = 0x42
+  header[1] = 0x4d
+  view.setUint32(10, 54, true)
+  view.setUint32(14, 40, true)
+  view.setInt32(18, 1, true)
+  view.setInt32(22, 2, true)
+  view.setUint16(28, 24, true)
+  const pixels = Uint8Array.of(0xff, 0, 0, 0, 0, 0, 0xff, 0) // blue row, then red row
+  const bmp = new Uint8Array(header.length + pixels.length)
+  bmp.set(header)
+  bmp.set(pixels, header.length)
+
+  const read = readBmp(bmp)
+  expect(read?.at(0, 0)).toBe(0xff0000)
+  expect(read?.at(0, 1)).toBe(0x0000ff)
+
+  const cells = bmpToCells(toBase64(bmp), 1, 1)
+  expect(cells).toBe(toBase64(new Uint8Array(Uint32Array.of(0x2580, 0xff0000, 0x0000ff).buffer)))
+})
+
+test('the pane says how to start when there are no images', async ($, on) => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({
+      plugin: 'image-peek',
+      surface,
+      component: 'Pane',
+      requestId: 'image-peek',
+      props: {
+        title: 'Images',
+        isFocused: false,
+        bodyColumns: 40,
+        placement: 'dock',
+        scroll: { offset: 0, bodyRows: 20 },
+        view: {},
+      },
+    })
+    expect((await ui.find({ type: 'Text', text: /No images yet/ }))?.text).toBe('No images yet.')
+    await ui.unmount()
+  }
+})
+
+test('a sent prompt with an image gets a chip under it', async ($, on) => {
+  on('state.get', seed({ images: [SHOT], isDebug: false }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+
+  const ui = await $.ui.mount({
+    plugin: 'image-peek',
+    surface: 'desktop',
+    component: 'UserMessage',
+    requestId: 'msg-1',
+    props: { text: 'fix the margin in [Image #1]', origin: { kind: 'composer' }, isExpanded: false },
+  })
+  expect(await ui.find({ type: 'Text', text: /engine row/ })).toBeDefined()
+  expect((await ui.find({ key: 'peek-msg-1-1' }))?.props.label).toBe('▣ Image 1')
+  await ui.unmount()
+})
+
+test('a row with no image of its own is left to the engine', async ($, on) => {
+  on('state.get', seed({ images: [SHOT], isDebug: false }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+
+  const ui = await $.ui.mount({
+    plugin: 'image-peek',
+    surface: 'desktop',
+    component: 'UserMessage',
+    requestId: 'msg-2',
+    props: { text: 'and now [Image #3] please', origin: { kind: 'composer' }, isExpanded: false },
+  })
+  expect(await ui.find({ key: 'peek-msg-1-1' })).toBeUndefined()
+  await ui.unmount()
+})
+
+const FULLSCREEN = { columns: 100, rows: 40, isFullscreen: true }
+// No terminal here: every environment variable the mod asks for is unset.
+const noEnv = () => ({ value: undefined })
+
+const BAND = {
+  plugin: 'image-peek',
+  surface: 'terminal',
+  component: 'AbovePrompt',
+  requestId: 'above-prompt',
+  viewport: FULLSCREEN,
+  props: { hasSurvey: false, isWorking: false, maxRows: 12, bodyColumns: 100, scroll: { offset: 0, bodyRows: 12 }, view: {} },
+} as const
+
+test('fullscreen: the chip lights a hover scope and the band holds its picture', { options: { graphics: 'file' } }, async ($, on) => {
+  on('state.get', seed({ images: [SHOT], isDebug: false }))
+  on('env.get', noEnv)
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+
+  const row = await $.ui.mount({
+    plugin: 'image-peek',
+    surface: 'terminal',
+    component: 'UserMessage',
+    requestId: 'msg-1',
+    viewport: FULLSCREEN,
+    props: { text: 'fix the margin in [Image #1]', origin: { kind: 'composer' }, isExpanded: false },
+  })
+  // The kit shows a Box by its key alone; its hover styles are the surface's.
+  expect((await row.find({ key: 'chip-msg-1-1' }))?.type).toBe('Box')
+  await row.unmount()
+
+  const band = await $.ui.mount(BAND)
+  expect((await band.find({ key: 'preview-msg-1-1' }))?.type).toBe('Box')
+  expect((await band.find({ type: 'Image' }))?.props.source).toEqual({ file: SHOT.thumb, format: 'png' })
+  await band.unmount()
+})
+
+test('fullscreen: a draft shows as a chip, its picture only on hover', { options: { graphics: 'file' } }, async ($, on) => {
+  const draft: PeekImage = { ...SHOT, id: 'draft-1-5', source: 'clipboard', messageId: undefined, promptText: undefined }
+  on('state.get', seed({ images: [draft], isDebug: false }))
+  on('env.get', noEnv)
+  const band = await $.ui.mount(BAND)
+  // The chip's Box lights the scope; the one picture drawn is the hidden preview's.
+  expect((await band.find({ key: 'band-draft-1-5' }))?.type).toBe('Box')
+  expect((await band.find({ key: 'preview-draft-1-5' }))?.type).toBe('Box')
+  expect((await band.find({ type: 'Image' }))?.props.source).toEqual({ file: SHOT.thumb, format: 'png' })
+  await band.unmount()
+})
+
+test('fullscreen: a short band never outgrows its rows; a hint stands in for a tiny picture', { options: { graphics: 'file' } }, async ($, on) => {
+  const draft: PeekImage = { ...SHOT, id: 'draft-1-5', source: 'clipboard', messageId: undefined, promptText: undefined }
+  on('state.get', seed({ images: [draft], isDebug: false }))
+  on('env.get', noEnv)
+  // Title, picture and chip row fit the band whole.
+  const tall = await $.ui.mount(BAND)
+  expect((await tall.find({ type: 'Image' }))?.props.rows).toBeLessThanOrEqual(BAND.props.maxRows - 2)
+  await tall.unmount()
+  // Three rows: the chip row and a one-line hint, no picture.
+  const short = await $.ui.mount({ ...BAND, props: { ...BAND.props, maxRows: 3, scroll: { offset: 0, bodyRows: 3 } } })
+  expect(await short.find({ type: 'Image' })).toBeUndefined()
+  expect(await short.find({ type: 'Text', text: /Image 1 · click to open/ })).toBeDefined()
+  expect((await short.find({ key: 'band-draft-1-5' }))?.type).toBe('Box')
+  await short.unmount()
+  // One row: the chip row alone.
+  const one = await $.ui.mount({ ...BAND, props: { ...BAND.props, maxRows: 1, scroll: { offset: 0, bodyRows: 1 } } })
+  expect(await one.find({ key: 'preview-draft-1-5' })).toBeUndefined()
+  expect((await one.find({ key: 'band-draft-1-5' }))?.type).toBe('Box')
+  await one.unmount()
+})
+
+test('graphics off: the hidden preview says how to open the picture', { options: { graphics: 'off' } }, async ($, on) => {
+  on('state.get', seed({ images: [SHOT], isDebug: false }))
+  on('env.get', noEnv)
+  const band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Image' })).toBeUndefined()
+  expect(await band.find({ type: 'Text', text: /\/peek open 1/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('a resumed row matches past the source path the engine stores beside a dropped file', async ($, on) => {
+  const old: PeekImage = {
+    ...SHOT,
+    id: 'hist-5-1',
+    messageId: undefined,
+    source: 'history',
+    promptText: '[Image #1] [Image: source: /var/folders/v6/x/T/TemporaryItems/NSIRD_screencaptureui_7uILAW/Screenshot 2026-10-25 at 8.42.23 PM.png]',
+  }
+  on('state.get', seed({ images: [old], isDebug: false }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  const ui = await rowOf($, '4d2840a8-3149-4d33-b412-000000000000', '[Image #1]')
+  expect(await ui.find({ key: 'peek-hist-5-1' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the image bytes reach the decoder on its standard input, on every platform', async () => {
+  const windows = writeBase64Command({ os: 'windows', dir: 'C:\\Users\\me\\claude-image-peek\\s1' }, 'aGVsbG8=', "C:\\x\\it's.png")
+  expect(windows.argv[0]).toBe('powershell.exe')
+  expect(windows.argv.at(-1)).toContain("'C:\\x\\it''s.png'")
+  expect(windows.argv.at(-1)).toContain('[Console]::In.ReadToEnd()')
+  expect(windows.stdin).toBe('aGVsbG8=')
+
+  const mac = writeBase64Command({ os: 'mac', dir: '/t/claude-image-peek/s1' }, 'aGVsbG8=', '/t/a b.png')
+  expect(mac.argv).toEqual(['sh', '-c', 'base64 --decode > "$1"', 'sh', '/t/a b.png'])
+  expect(mac.stdin).toBe('aGVsbG8=')
+})
+
+test('a macOS screenshot dropped from the Desktop is read as one path', async () => {
+  // macOS puts a narrow no-break space (U+202F) before AM/PM in screenshot names.
+  const name = '/Users/me/Desktop/Screenshot\\ 2026-10-25\\ at\\ 8.31.06 PM.png'
+  expect(imagePaths(name)).toEqual(['/Users/me/Desktop/Screenshot 2026-10-25 at 8.31.06 PM.png'])
+})
+
+test('the band above the prompt shows the draft images', async ($, on) => {
+  const draft: PeekImage = { ...SHOT, id: 'draft-1-5', messageId: undefined, promptText: undefined, source: 'clipboard' }
+  on('state.get', seed({ images: [draft], isDebug: false }))
+  on('env.get', noEnv)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({
+      plugin: 'image-peek',
+      surface,
+      component: 'AbovePrompt',
+      requestId: 'above-prompt',
+      viewport: FULLSCREEN,
+      props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+    })
+    expect(await ui.find({ key: 'draft-draft-1-5' })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+const rowOf = async ($: Parameters<TestBody>[0], requestId: string, text: string) =>
+  $.ui.mount({
+    plugin: 'image-peek',
+    surface: 'desktop',
+    component: 'UserMessage',
+    requestId,
+    props: { text, origin: { kind: 'composer' }, isExpanded: false },
+  })
+
+test("a row finds its stored image by the row id's shared prefix", async ($, on) => {
+  const sent: PeekImage = { ...SHOT, id: 'sent-1', messageId: '08e22b78-772c-44ea-8c48-220f9dd6f0cb', promptText: 'something else' }
+  on('state.get', seed({ images: [sent], isDebug: false }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  const ui = await rowOf($, '08e22b78-772c-44ea-8c48-000000000000', '[Image #1]')
+  expect(await ui.find({ key: 'peek-sent-1' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a resumed row finds its image past the engine reminder in the stored text', async ($, on) => {
+  const old: PeekImage = {
+    ...SHOT,
+    id: 'hist-3-1',
+    messageId: undefined,
+    source: 'history',
+    promptText: '<system-reminder>\n# Environment\nworking directory: /x\n</system-reminder>\n[Image #1]',
+  }
+  on('state.get', seed({ images: [old], isDebug: false }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  const ui = await rowOf($, 'aaaaaaaa-bbbb-cccc-dddd-000000000000', '[Image #1]')
+  expect(await ui.find({ key: 'peek-hist-3-1' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a resumed row finds its image past a slash command record merged into its row', async ($, on) => {
+  const old: PeekImage = {
+    ...SHOT,
+    id: 'hist-5-1',
+    messageId: undefined,
+    source: 'history',
+    promptText:
+      '<command-name>/peek</command-name> <command-message>peek</command-message> <command-args></command-args> <local-command-stdout>image-peek: 0 images.</local-command-stdout> [Image #1] [Image #2] test',
+  }
+  on('state.get', seed({ images: [old], isDebug: false }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  const ui = await rowOf($, 'aaaaaaaa-bbbb-cccc-dddd-000000000000', '[Image #1] [Image #2] test')
+  expect(await ui.find({ key: 'peek-hist-5-1' })).toBeDefined()
+  await ui.unmount()
+})

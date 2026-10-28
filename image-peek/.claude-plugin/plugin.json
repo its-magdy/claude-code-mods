@@ -1,0 +1,44 @@
+{
+  "name": "image-peek",
+  "displayName": "Image Peek",
+  "version": "0.1.0",
+  "description": "See the images you paste: thumbnails above the prompt while you type, a hover preview on sent messages, a pane, and /peek N for a big view.",
+  "author": {
+    "name": "Mohamed Omar",
+    "url": "https://github.com/its-magdy"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/its-magdy/claude-code-mods/tree/main/image-peek",
+  "repository": "https://github.com/its-magdy/claude-code-mods",
+  "keywords": [
+    "images",
+    "screenshots",
+    "clipboard",
+    "paste",
+    "preview",
+    "terminal",
+    "pane"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "graphics": {
+      "type": "string",
+      "title": "How to draw images",
+      "description": "auto picks by terminal. file: kitty/Ghostty read the PNG from disk. bytes: send PNG bytes (iTerm2, tmux). blocks: colored half-block cells, works in any terminal. off: labels only.",
+      "default": "auto",
+      "options": [
+        "auto",
+        "file",
+        "bytes",
+        "blocks",
+        "off"
+      ]
+    },
+    "autoOpenPane": {
+      "type": "boolean",
+      "title": "Open the pane when you paste an image",
+      "description": "Opens the Images pane beside the chat (fullscreen layout only) the first time an image lands in the prompt. The band above the prompt shows it either way.",
+      "default": false
+    }
+  }
+}

@@ -1,0 +1,41 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Weekly, so a new Claude Code release that breaks a mod shows up even
+  # in a week with no pushes.
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  mods:
+    name: mods (Claude Code ${{ matrix.claude-code }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The pinned version the mods were verified on must pass; raise it
+        # after checking a newer release. "latest" only warns.
+        claude-code: ['2.1.312', 'latest']
+    continue-on-error: ${{ matrix.claude-code == 'latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@${{ matrix.claude-code }}
+      - name: Validate the marketplace
+        run: claude plugin validate . --strict
+      - name: Validate and test each mod
+        run: |
+          for mod in */.claude-plugin/plugin.json; do
+            dir="${mod%/.claude-plugin/plugin.json}"
+            echo "::group::$dir"
+            claude plugin validate "./$dir" --strict
+            claude plugin test "./$dir"
+            echo "::endgroup::"
+          done
