@@ -543,7 +543,7 @@ export const register: Register = (on, options) => {
     const started = await next(e)
     await $.command.register({
       name: 'peek',
-      description: 'Show pasted images: /peek, /peek N, /peek open N, /peek debug',
+      description: 'Show pasted images: /peek, /peek N, /peek open N, /peek clear, /peek debug',
       argumentHint: '[N | open N | clear | debug]',
     })
     later($, 'start', async born => {

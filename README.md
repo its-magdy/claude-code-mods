@@ -1,5 +1,7 @@
 # claude-code-mods
 
+[![check](https://github.com/its-magdy/claude-code-mods/actions/workflows/check.yml/badge.svg)](https://github.com/its-magdy/claude-code-mods/actions/workflows/check.yml)
+
 Mods for [Claude Code](https://code.claude.com): each lives in its own folder,
 and `.claude-plugin/marketplace.json` lists them so each installs and turns on
 or off on its own.
@@ -37,8 +39,33 @@ Once Claude Code has loaded a mod from its folder (the command above) it writes
 the API types into `<mod>/.claude-plugin/types/` (ignored by git), and
 `npx -p typescript tsc -p <mod>` type-checks it.
 
+### CI
+
+[`check.yml`](.github/workflows/check.yml) runs on pushes to `main`, pull
+requests, every Monday at 06:00 UTC and on demand:
+
+- **mods:** validates the marketplace and each mod with `--strict`, then runs
+  `claude plugin test` on each mod. It runs on Node.js 24 against two Claude
+  Code versions: the pinned one the mods were verified on (`2.1.312`), which
+  must pass, and `latest`, which only warns.
+- **versions:** writes a table to the run summary comparing the pinned Claude
+  Code, the Node.js major and TypeScript with their newest releases, and warns
+  when Claude Code or Node.js is behind.
+
+After checking a mod on a newer Claude Code release, raise the pin in the
+matrix. Keep it first in the list: the `versions` job reads the first entry as
+the pin. Dependabot bumps the SHA-pinned actions monthly.
+
 ### Releasing
 
 Each mod's `plugin.json` carries a `version`. Installed copies update only
 when it changes, so bump it with every release you push (`0.1.0` → `0.1.1`).
 Keep the version in `plugin.json` only, never in `marketplace.json` too.
+
+## Security
+
+Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
+
+## License
+
+[MIT](LICENSE)

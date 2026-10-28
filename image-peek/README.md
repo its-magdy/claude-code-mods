@@ -5,7 +5,7 @@ When you paste an image into Claude Code it shows up as `[Image #1]`. This mod l
 - **While you type:** a band right above the prompt shows a thumbnail for each `[Image #N]` in your draft (click one to see it big). `/peek` opens the **Images** pane beside the chat.
 - **On sent messages:** each image gets a `▣ Image N` chip under your message. In the fullscreen layout, hover over it to see the image and click to open it in the pane. On the main screen, small thumbnails are drawn inline instead.
 - **Old chats:** when you resume a session, its images are read back from the conversation, so the chips work there too.
-- **`/peek`** opens the pane, **`/peek N`** shows image N big, **`/peek open N`** opens it in your system viewer (Preview on macOS), **`/peek clear`** empties the list, **`/peek debug`** shows the mod's probe lines in the transcript.
+- **`/peek`** opens the pane, **`/peek N`** shows image N big (in your system viewer when drawing is `off`), **`/peek open N`** opens it in your system viewer (Preview on macOS), **`/peek clear`** empties the list, **`/peek debug`** turns the mod's probe lines in the transcript on or off.
 
 ## Install
 
@@ -33,7 +33,7 @@ Turn it off or on again with `claude plugin disable image-peek` / `claude plugin
 2. **When you send:** the image bytes stored with your prompt replace that guess, so what you see is exactly what Claude got.
 3. **When you resume:** images in the conversation are written back out to files.
 
-The files live in a folder only you can read (macOS: your per-user temp folder; Linux: `$XDG_RUNTIME_DIR` or `~/.cache`; Windows: `%LOCALAPPDATA%`), under `claude-image-peek/<session>/`, and are removed when the session ends (on Windows, by a later session once they're a day old).
+The files live in a folder only you can read (macOS: your per-user temp folder; Linux: `$XDG_RUNTIME_DIR` or `~/.cache`; Windows: `%LOCALAPPDATA%`), under `claude-image-peek/<session>/`, and are removed when the session ends or you `/clear` or `/resume` (on Windows, a session that exits is cleaned up by a later session once its folder is a day old).
 
 ## Terminals
 
@@ -43,7 +43,14 @@ The files live in a folder only you can read (macOS: your per-user temp folder; 
 | iTerm2 3.5+ (fullscreen layout; blocks inline on the main screen), tmux with `allow-passthrough on` and `focus-events on` | Real pixels (PNG bytes) |
 | VS Code, Windows Terminal, GNOME Terminal, Konsole, Terminal.app, … | A colored half-block preview; `/peek open N` for full quality |
 
-If the guess is wrong for your terminal, set **How to draw images** in `/config` (`file`, `bytes`, `blocks` or `off`).
+## Settings
+
+Both are in `/config`:
+
+| Setting | Values | Default |
+| --- | --- | --- |
+| **How to draw images** | `auto` picks by terminal (table above); `file`, `bytes`, `blocks` or `off` (labels only) | `auto` |
+| **Open the pane when you paste an image** | Opens the Images pane (fullscreen layout only) the first time an image lands in the prompt | off |
 
 ## Needs
 
