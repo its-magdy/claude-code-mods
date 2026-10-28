@@ -401,8 +401,9 @@ test('a resumed row is read back unless this session sent as many rows of its te
   expect(unread([{ ...SHOT, id: 'hist-7-1' }], [row(7, 'b')])).toEqual([])
 })
 
-// A 1 x 2 BMP, red over blue: every cell it is scaled to reads red on top, blue below.
-const tinyBmp = () => {
+// A 1 x 2 BMP, red over blue (blue over red when flipped): every cell it is
+// scaled to reads red on top, blue below.
+const tinyBmp = (isFlipped = false) => {
   const bmp = new Uint8Array(54 + 8)
   const view = new DataView(bmp.buffer)
   bmp[0] = 0x42
@@ -412,7 +413,7 @@ const tinyBmp = () => {
   view.setInt32(18, 1, true)
   view.setInt32(22, 2, true)
   view.setUint16(28, 24, true)
-  bmp.set(Uint8Array.of(0xff, 0, 0, 0, 0, 0, 0xff, 0), 54)
+  bmp.set(isFlipped ? Uint8Array.of(0, 0, 0xff, 0, 0xff, 0, 0, 0) : Uint8Array.of(0xff, 0, 0, 0, 0, 0, 0xff, 0), 54)
   return toBase64(bmp)
 }
 
@@ -459,7 +460,7 @@ test('blocks: a sent picture draws a placeholder, then its cells once made off t
   await row.unmount()
 })
 
-test('blocks: a picture cleared and then restored at the same path draws its cells again', { options: { graphics: 'blocks' } }, async ($, on) => {
+test('blocks: a picture cleared and then restored at the same path draws its cells again, made afresh', { options: { graphics: 'blocks' } }, async ($, on) => {
   const clock = mock.clock(on)
   // A store the mod can write: `/peek clear` empties the list.
   const stored = new Map<string, unknown>([['images', { shape: 'images-2', value: [SHOT] }]])
@@ -474,7 +475,8 @@ test('blocks: a picture cleared and then restored at the same path draws its cel
   on('process.run', (_, e) => ({
     value: { exitCode: 0, stdout: e.argv[0] === 'uname' ? 'Darwin 25.0.0' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   }))
-  on('fs.read', () => ({ value: { base64: tinyBmp() } }))
+  let bmp = tinyBmp()
+  on('fs.read', () => ({ value: { base64: bmp } }))
   on('fs.list', () => ({ value: [] }))
   on('ui.log', () => ({ value: undefined }))
   on('ui.render', ($, e) => {
@@ -494,14 +496,19 @@ test('blocks: a picture cleared and then restored at the same path draws its cel
     await clock.settle()
     const raster = await row.find({ type: 'Raster' })
     await row.unmount()
-    return raster !== undefined
+    return raster?.props.cells
   }
 
-  expect(await drawsCells()).toBe(true)
+  const first = await drawsCells()
+  expect(first).toBeDefined()
   await $.command.run({ command: 'peek', args: 'clear', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
-  // A resumed session reads the same row back to the same file names.
+  // A resumed session reads the same row back to the same file names, with
+  // other pixels in them: the cleared picture's cells are not drawn again.
+  bmp = tinyBmp(true)
   stored.set('images', { shape: 'images-2', value: [SHOT] })
-  expect(await drawsCells()).toBe(true)
+  const again = await drawsCells()
+  expect(again).toBeDefined()
+  expect(again).not.toEqual(first)
 })
 
 const STORE_DIR = '/t/claude-image-peek/sess-1'
@@ -581,4 +588,27 @@ test('a stored prompt whose picture cannot be converted leaves no files behind',
   await storeJpeg($)
   await clock.settle()
   expect(left()).toEqual(['.lease'])
+})
+
+test('a resumed session reads its prompts\' pictures back from the conversation', { options: { graphics: 'file' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const left = fakeMac(on, true)
+  on('session.messages', () => ({
+    value: [
+      { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'hi' }] },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'look at [Image #2]' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } },
+        ],
+      },
+    ],
+  }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  expect(left()).toEqual(['.lease', 'hist-2-2.png', 'hist-2-2.small.png', 'hist-2-2.thumb.png'])
 })

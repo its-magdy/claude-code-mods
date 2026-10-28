@@ -1,8 +1,10 @@
 // The session's pictures: the image list, the generation, and the files
-// work makes for it (`finish` makes a picture's PNG and thumbnails). Work names each file it makes here; when the work ends,
-// whatever no kept picture owns is deleted. A new generation (a session end,
-// /clear, /resume, /peek clear) outlives the work begun before it: that work
-// stops before it changes the list, and its files go when it ends.
+// work makes for it (`finish` makes a picture's PNG and thumbnails). Work is
+// had only through `later` or `run`, which end it: it names each file it
+// makes here, and when it ends, whatever no kept picture owns is deleted. A
+// new generation (a session end, /clear, /resume, /peek clear) outlives the
+// work begun before it: that work stops before it changes the list, and its
+// files go when it ends.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
@@ -11,6 +13,8 @@ import type { PeekImage } from '../types'
 import { host, join, pngSize, removeFiles, toPng } from './host'
 import type { Host } from './host'
 import { capped } from './list'
+import { forget } from './picture'
+import { probe } from './session'
 
 type $ = EngineInterface
 
@@ -27,7 +31,7 @@ export type Work = { readonly born: number; readonly files: Map<string, Host> }
 const fileName = (path: string) => path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1)
 
 /** Work of the current generation. */
-export const begin = (): Work => ({ born: generation, files: new Map() })
+const begin = (): Work => ({ born: generation, files: new Map() })
 
 /** False once a newer generation began: the work should stop. */
 export const isLive = (work: Work) => work.born === generation
@@ -49,12 +53,12 @@ export async function pictures($: $) {
 }
 
 /**
- * Changes the list for the work, capped to the newest MAX_KEPT, and deletes
- * the files of the entries it drops. Not kept when a newer generation came
+ * Changes the list for the work, capped to the newest MAX_KEPT, and lets go
+ * of the entries it drops (see `release`). False when a newer generation came
  * first: the change was not made.
  */
 export async function keep($: $, work: Work, change: (list: PeekImage[]) => PeekImage[]) {
-  if (!isLive(work)) return { isKept: false, dropped: [] }
+  if (!isLive(work)) return false
   let isKept = false
   let dropped: PeekImage[] = []
   await update($, images, list => {
@@ -69,18 +73,23 @@ export async function keep($: $, work: Work, change: (list: PeekImage[]) => Peek
     dropped = list.filter(img => !next.some(kept => kept.id === img.id))
     return next
   })
-  await removeAll($, dropped)
-  return { isKept, dropped }
+  await release($, dropped, 'delete')
+  return isKept
 }
 
-/** Deletes every file of the pictures: each under its id, and its PNG by name. */
-async function removeAll($: $, dropped: readonly PeekImage[]) {
-  if (dropped.length === 0) return
+/**
+ * Lets go of pictures that left the list: what was kept to draw them, and
+ * with `files: 'delete'` every file of theirs (each under its id, and its PNG
+ * by name).
+ */
+async function release($: $, dropped: readonly PeekImage[], files: 'delete' | 'leave') {
+  for (const img of dropped) forget(img)
+  if (files === 'leave' || dropped.length === 0) return
   await removeFiles($, await host($), dropped.map(img => img.id), dropped.map(img => fileName(img.path)))
 }
 
 /** Deletes the files the work made that no kept picture owns. */
-export async function end($: $, work: Work) {
+async function end($: $, work: Work) {
   if (work.files.size === 0) return
   const owned = new Set((await read($, images)).flatMap(img => [img.path, img.thumb, img.small]))
   const byDir = new Map<string, { h: Host; names: string[] }>()
@@ -95,7 +104,7 @@ export async function end($: $, work: Work) {
 }
 
 /**
- * Begins a new generation with an empty list, and gives back what it held.
+ * Begins a new generation with an empty list, and lets go of what it held.
  * `files: 'delete'` deletes their files; 'leave' when the folder goes whole.
  */
 export async function reset($: $, files: 'delete' | 'leave') {
@@ -105,8 +114,7 @@ export async function reset($: $, files: 'delete' | 'leave') {
     dropped = list
     return []
   })
-  if (files === 'delete') await removeAll($, dropped)
-  return dropped
+  await release($, dropped, files)
 }
 
 /** Makes the PNG and its two thumbnails, and reads the thumbnail's size; a step file the work made goes when it ends. */
@@ -129,4 +137,34 @@ export async function finish(
   const { width, height } = await pngSize($, shown)
   const { file: _file, ...rest } = base
   return { ...rest, path, thumb: shown, small: smallShown, width, height, addedAt: await $.clock.now() }
+}
+
+/**
+ * Runs work after the hook that asked for it has answered: the reference puts
+ * work that outlives a dispatch on `$.clock`, never on the dispatch itself.
+ * The work is of the generation it was asked in; once it ends, the files it
+ * made that no kept picture owns are deleted.
+ */
+export function later($: $, label: string, job: (work: Work) => Promise<unknown>, ms = 0) {
+  const work = begin()
+  $.clock.after(ms, () => {
+    if (!isLive(work)) return
+    // The error's name only: its message may hold a file path.
+    const failed = (error: unknown) => probe($, `${label} failed`, error instanceof Error ? error.name : typeof error)
+    job(work)
+      .catch(failed)
+      .then(() => end($, work))
+      .catch(failed)
+  })
+  return work
+}
+
+/** Runs work of the current generation now, and ends it. */
+export async function run<T>($: $, job: (work: Work) => Promise<T>) {
+  const work = begin()
+  try {
+    return await job(work)
+  } finally {
+    await end($, work)
+  }
 }

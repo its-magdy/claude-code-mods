@@ -10,9 +10,9 @@ import { Lru } from './cache'
 import { host, toBmp } from './host'
 import { MAX_KEPT } from './list'
 import { bmpToCells } from './raster'
-import { begin, claim, end, isLive } from './pictures'
+import { claim, isLive, later, run } from './pictures'
 import type { Work } from './pictures'
-import { isFullscreen, later, probe } from './session'
+import { isFullscreen, probe } from './session'
 
 type $ = EngineInterface
 type Mode = 'file' | 'bytes' | 'blocks' | 'off'
@@ -119,18 +119,15 @@ function makeCells($: $, img: PeekImage, size: Size) {
 
 async function convertCells($: $, img: PeekImage, size: Size, key: string, job: { isVoid: boolean }) {
   // The cells are all that's kept; each window size would leave a BMP behind.
-  const work = begin()
-  const h = await host($)
-  try {
+  await run($, async work => {
+    const h = await host($)
     const bmp = claim(work, h, `${img.id}-${size.columns}x${size.rows}.bmp`)
     const ok = await toBmp($, h, img.small, bmp, size.columns, size.rows * 2)
     const { base64 } = ok ? await $.fs.read(bmp, { as: 'bytes' }).catch(() => ({ base64: '' })) : { base64: '' }
     // Dropped while its cells were made: keep nothing for a picture that's gone.
     if (job.isVoid || !isLive(work)) return
     cellCache.set(key, base64 ? (bmpToCells(base64, size.columns, size.rows) ?? null) : null)
-  } finally {
-    await end($, work)
-  }
+  })
 }
 
 /** Cells for a size, or undefined while they are made off the drawing; the drawing comes again once they are. */

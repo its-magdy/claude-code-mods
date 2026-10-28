@@ -1,11 +1,8 @@
-// What the session's hooks share: work scheduled for later, the layout the
-// last drawing saw, and the debug lines.
+// What the session's hooks share: the layout the last drawing saw, and the
+// debug lines.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, RenderViewport } from 'claude-code'
-
-import { begin, end, isLive } from './pictures'
-import type { Work } from './pictures'
 
 type $ = EngineInterface
 
@@ -42,22 +39,3 @@ export async function probe($: $, label: string, data: unknown) {
   $.ui.log(`[image-peek] ${label} ${JSON.stringify(data)}`, { to: isOn ? 'transcript' : 'debug' })
 }
 
-/**
- * Runs work after the hook that asked for it has answered: the reference puts
- * work that outlives a dispatch on `$.clock`, never on the dispatch itself.
- * The work is of the generation it was asked in (see `begin`); once it ends,
- * the files it made that no kept picture owns are deleted.
- */
-export function later($: $, label: string, job: (work: Work) => Promise<unknown>, ms = 0) {
-  const work = begin()
-  $.clock.after(ms, () => {
-    if (!isLive(work)) return
-    // The error's name only: its message may hold a file path.
-    const failed = (error: unknown) => probe($, `${label} failed`, error instanceof Error ? error.name : typeof error)
-    job(work)
-      .catch(failed)
-      .then(() => end($, work))
-      .catch(failed)
-  })
-  return work
-}
