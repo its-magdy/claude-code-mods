@@ -1,7 +1,8 @@
 version: 2
 updates:
-  # Keeps the SHA-pinned actions in .github/workflows current.
+  # Keeps the SHA-pinned actions in .github/workflows current. Monthly runs
+  # land on the 1st of the month.
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
