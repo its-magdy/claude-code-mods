@@ -32,7 +32,11 @@ export const begin = (): Work => ({ born: generation, files: new Map() })
 /** False once a newer generation began: the work should stop. */
 export const isLive = (work: Work) => work.born === generation
 
-/** A path in the session's folder for the work to make; deleted when the work ends, unless a kept picture owns it. */
+/**
+ * A path in the session's folder for the work to make; deleted when the work
+ * ends, unless a kept picture owns it. Code that writes into the folder takes
+ * its path from here: a file written past it is never deleted.
+ */
 export function claim(work: Work, h: Host, name: string) {
   const path = join(h, name)
   work.files.set(path, h)

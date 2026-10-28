@@ -4,7 +4,7 @@ import type { TestBody } from 'claude-code/testing'
 import type { PeekImage } from '../types'
 import { toBase64 } from '../hooks/base64'
 import { Lru } from '../hooks/cache'
-import { imagePaths, writeBase64Command } from '../hooks/host'
+import { imagePaths } from '../hooks/host'
 import { addDraft, drafts, forRow, sent, storePrompt, tagDrafts, unread } from '../hooks/list'
 import { bmpToCells, readBmp } from '../hooks/raster'
 
@@ -241,16 +241,38 @@ test('a resumed row matches past the source path the engine stores beside a drop
   await ui.unmount()
 })
 
-test('the image bytes reach the decoder on its standard input, on every platform', async () => {
-  const windows = writeBase64Command({ os: 'windows', dir: 'C:\\Users\\me\\claude-image-peek\\s1' }, 'aGVsbG8=', "C:\\x\\it's.png")
-  expect(windows.argv[0]).toBe('powershell.exe')
-  expect(windows.argv.at(-1)).toContain("'C:\\x\\it''s.png'")
-  expect(windows.argv.at(-1)).toContain('[Console]::In.ReadToEnd()')
-  expect(windows.stdin).toBe('aGVsbG8=')
+/**
+ * The command a stored prompt's bytes are decoded with, on a platform its
+ * environment names: every process the mod runs is recorded and succeeds.
+ */
+async function decodeCommand($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], env: Record<string, string>) {
+  const clock = mock.clock(on)
+  const runs: { argv: readonly string[]; stdin?: string }[] = []
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('env.get', (_, e) => ({ value: env[e.name] }))
+  on('ui.log', () => ({ value: undefined }))
+  on('fs.write', () => ({ value: undefined }))
+  on('fs.list', () => ({ value: [] }))
+  on('process.run', (_, e) => {
+    runs.push({ argv: e.argv, stdin: e.init?.stdin })
+    const stdout = e.argv[0] === 'uname' ? 'Darwin 25.0.0' : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  await storeJpeg($)
+  await clock.settle()
+  return runs.find(r => r.stdin === 'aGVsbG8=')
+}
 
-  const mac = writeBase64Command({ os: 'mac', dir: '/t/claude-image-peek/s1' }, 'aGVsbG8=', '/t/a b.png')
-  expect(mac.argv).toEqual(['sh', '-c', 'base64 --decode > "$1"', 'sh', '/t/a b.png'])
-  expect(mac.stdin).toBe('aGVsbG8=')
+test('on Windows the image bytes reach the decoder on its standard input', { options: { graphics: 'file' } }, async ($, on) => {
+  const run = await decodeCommand($, on, { OS: 'Windows_NT', LOCALAPPDATA: "C:\\Users\\o'brien\\AppData\\Local" })
+  expect(run?.argv[0]).toBe('powershell.exe')
+  expect(run?.argv.at(-1)).toMatch(/^\[IO\.File\]::WriteAllBytes\('C:\\Users\\o''brien\\AppData\\Local\\claude-image-peek\\sess-1\\[^']+\.jpg', \[Convert\]::FromBase64String\(\[Console\]::In\.ReadToEnd\(\)\)\)$/)
+})
+
+test('on macOS the image bytes reach the decoder on its standard input', { options: { graphics: 'file' } }, async ($, on) => {
+  const run = await decodeCommand($, on, { TMPDIR: '/t/' })
+  expect(run?.argv.slice(0, 4)).toEqual(['sh', '-c', 'base64 --decode > "$1"', 'sh'])
+  expect(run?.argv[4]).toMatch(/^\/t\/claude-image-peek\/sess-1\/[^/]+\.jpg$/)
 })
 
 test('a macOS screenshot dropped from the Desktop is read as one path', async () => {

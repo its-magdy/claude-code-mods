@@ -229,17 +229,13 @@ export async function pngSize($: $, path: string) {
   return { width: view.getUint32(16), height: view.getUint32(20) }
 }
 
-/** The command that writes base64 bytes to `out`, the bytes going in on its standard input. */
-export function writeBase64Command(h: Host, base64: string, out: string): { argv: string[]; stdin: string } {
-  return h.os === 'windows'
-    ? { argv: [...POWERSHELL, `[IO.File]::WriteAllBytes(${quotePs(out)}, [Convert]::FromBase64String([Console]::In.ReadToEnd()))`], stdin: base64 }
-    : { argv: ['sh', '-c', 'base64 --decode > "$1"', 'sh', out], stdin: base64 }
-}
-
-/** Writes base64 bytes to `out`. */
+/** Writes base64 bytes to `out`, the bytes going in on the decoder's standard input. */
 export async function writeBase64($: $, h: Host, base64: string, out: string) {
-  const { argv, stdin } = writeBase64Command(h, base64, out)
-  return (await run($, argv, stdin)).exitCode === 0
+  const r =
+    h.os === 'windows'
+      ? await powershell($, `[IO.File]::WriteAllBytes(${quotePs(out)}, [Convert]::FromBase64String([Console]::In.ReadToEnd()))`, base64)
+      : await run($, ['sh', '-c', 'base64 --decode > "$1"', 'sh', out], base64)
+  return r.exitCode === 0
 }
 
 export async function copyFile($: $, h: Host, from: string, to: string) {
