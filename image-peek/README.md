@@ -29,7 +29,7 @@ Turn it off or on again with `claude plugin disable image-peek` / `claude plugin
 
 ## How it gets the picture
 
-1. **As you paste:** when an `[Image #N]` appears in the prompt, the mod saves the clipboard image (macOS `osascript`, Linux `wl-paste`/`xclip`, Windows `powershell`). If the paste was a file path (a dropped file, or the screenshot thumbnail), it copies that file at once instead, because macOS deletes the thumbnail's temporary file soon after.
+1. **As you paste:** when an `[Image #N]` appears in the prompt, the mod saves the clipboard image (macOS `osascript`, Linux `wl-paste`/`xclip`, Windows `powershell`). A dropped or pasted file path is different: Claude Code turns it into `[Image #N]` without telling a mod which file it was. The image shows once you send; until then, on macOS, the mod may show the newest screenshot of the last two minutes as a guess (see below).
 2. **When you send:** the image bytes stored with your prompt replace that guess, so what you see is exactly what Claude got.
 3. **When you resume:** images in the conversation are written back out to files.
 
@@ -61,6 +61,7 @@ Both are in `/config`:
 ## Limits
 
 - Claude Code doesn't hand a normal mod the pasted image before you send, so the preview shown while typing is the mod's own copy from the clipboard. If the clipboard changed in between (or Claude Code dropped the paste), it can be wrong until you send.
+- A file you drop or paste as a path shows once you send, since Claude Code doesn't tell a mod which file it was. Until then, on macOS with Full Disk Access, the mod may show a screenshot from the last two minutes as a guess, which can be a different picture.
 - Over SSH there is no local clipboard: images show once sent.
 - Hovering needs the fullscreen layout, where Claude Code tracks the mouse.
 - The hover preview gets the rows left above the prompt. When there are fewer than 6 (a short window, a long draft), it shows "Image N · click to open" instead of a tiny picture.
