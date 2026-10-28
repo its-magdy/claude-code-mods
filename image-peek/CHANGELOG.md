@@ -3,6 +3,21 @@
 Each version matches `version` in `.claude-plugin/plugin.json` and is tagged
 `image-peek-v<version>`.
 
+## 0.1.2 — 2026-10-28
+
+### Fixed
+
+- The Images pane lists a picture you just sent under **Sent**. Until the
+  sent prompt's bytes arrived, it showed under **In your prompt**.
+- A resumed session reads back pictures of a prompt sent more than once,
+  even when the copies differ only in Claude Code's hidden reminders.
+
+### Docs
+
+- README: a file dropped or pasted as a path shows once sent; Claude Code
+  doesn't tell a mod which file it was. On macOS a recent screenshot may
+  show until then, as a guess.
+
 ## 0.1.1 — 2026-10-28
 
 ### Changed
