@@ -37,9 +37,13 @@ type Clipboard = { change: number; types: string[]; isImage: boolean }
 /**
  * The world beneath the mod for a capture: stored values in memory, a
  * session folder the processes write to and `rm` empties, the clipboard as
- * `osascript` reads it, and the prompt box.
+ * `osascript` reads it, the prompt box, and the screenshots on the Desktop
+ * (HOME unset: `/Desktop`), saved when the clock started.
  */
-function world(on: On, options: { clipboard: Clipboard; prompt: string; onRun?: (argv: readonly string[]) => void }) {
+function world(
+  on: On,
+  options: { clipboard: Clipboard; prompt: string; desktop?: string[]; onRun?: (argv: readonly string[]) => void },
+) {
   const clock = mock.clock(on)
   const stored = new Map<string, unknown>()
   const files = new Set<string>()
@@ -64,8 +68,9 @@ function world(on: On, options: { clipboard: Clipboard; prompt: string; onRun?: 
     if (e.path.startsWith(`${DIR}/`)) files.add(name(e.path))
     return { value: undefined }
   })
+  const entry = (file: string) => ({ name: file, kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })
   on('fs.list', (_, e) => ({
-    value: e.path === DIR ? [...files].map(file => ({ name: file, kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })) : [],
+    value: e.path === DIR ? [...files].map(entry) : e.path === '/Desktop' ? (options.desktop ?? []).map(entry) : [],
   }))
   on('process.run', (_, e) => {
     const argv = e.argv
@@ -89,6 +94,13 @@ function world(on: On, options: { clipboard: Clipboard; prompt: string; onRun?: 
       case 'sh': {
         const path = argv.at(-1)!
         return path.startsWith(`${DIR}/`) && files.has(name(path)) ? ok(pngHead(800, 400)) : ran(1, '', 'no such file')
+      }
+      case 'cp': {
+        const [from, to] = [argv[1]!, argv[2]!]
+        const isThere = from.startsWith(`${DIR}/`) ? files.has(name(from)) : (options.desktop ?? []).some(file => from === `/Desktop/${file}`)
+        if (!isThere || !to.startsWith(`${DIR}/`)) return ran(1, '', 'no such file')
+        files.add(name(to))
+        return ok()
       }
       case 'rm':
         for (const path of argv.slice(argv.indexOf('--') + 1)) files.delete(name(path))
@@ -156,4 +168,39 @@ test('a picture whose placeholder left the draft while it was made is not kept, 
 
   expect(w.list()).toEqual([])
   expect([...w.files]).toEqual(['.lease'])
+})
+
+/** Pastes "[Image #n]" after what the box holds, as the engine puts a placeholder in. */
+async function paste($: Parameters<TestBody>[0], w: ReturnType<typeof world>, text: string) {
+  w.setPrompt(text)
+  await promptChange($, { text, cursor: text.length, origin: { kind: 'engine' } })
+  await w.clock.settle()
+}
+
+test('the clipboard unchanged since the last paste: a screenshot saved just now is taken instead', { options: { graphics: 'off' } }, async ($, on) => {
+  const shot = 'Screenshot 2026-10-28 at 9.00.00\u202fPM.png'
+  const w = world(on, { clipboard: PNG_CLIPBOARD, prompt: '', desktop: [shot] })
+  await paste($, w, '[Image #1]')
+  await paste($, w, '[Image #1] [Image #2]')
+
+  const second = w.list().find(img => img.n === 2)
+  expect(second?.source).toBe('file')
+  expect(second?.path).toMatch(/\/drop-[0-9-]+\.png$/)
+  // The clipboard's stale copy for #2 went; #1's files and #2's copy stay.
+  const first = w.list().find(img => img.n === 1)!
+  expect([...w.files].filter(file => !file.startsWith(first.id)).sort()).toEqual([
+    '.lease',
+    name(second!.path),
+    `${second!.id}.small.png`,
+    `${second!.id}.thumb.png`,
+  ].sort())
+})
+
+test('the same clipboard image pasted again, with no recent screenshot, is taken from the clipboard', { options: { graphics: 'off' } }, async ($, on) => {
+  const w = world(on, { clipboard: PNG_CLIPBOARD, prompt: '' })
+  await paste($, w, '[Image #1]')
+  await paste($, w, '[Image #1] [Image #2]')
+
+  const second = w.list().find(img => img.n === 2)
+  expect([second?.source, second ? name(second.path) : undefined]).toEqual(['clipboard', `${second?.id}.png`])
 })

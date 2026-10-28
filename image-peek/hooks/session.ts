@@ -9,6 +9,9 @@ import type { Work } from './pictures'
 
 type $ = EngineInterface
 
+/** The Images pane's id. */
+export const PANE = 'image-peek'
+
 // The engine's scan reads an atom only where it is declared: a file that reads
 // or writes one declares it.
 const isDebug = atom({ plugin: 'image-peek', key: 'isDebug' } as const, false)

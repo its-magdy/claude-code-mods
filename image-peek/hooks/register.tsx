@@ -2,27 +2,10 @@ import { atom, read, update } from 'claude-code'
 import type { ApiContentBlock, EngineInterface, PluginOptions, Register } from 'claude-code'
 
 import type { PeekImage, PeekSource } from '../types'
-import {
-  copyFile,
-  ensureDir,
-  grabClipboard,
-  host,
-  hostFor,
-  imagePaths,
-  isImageFile,
-  linuxPath,
-  openExternally,
-  pngSize,
-  recentScreenshot,
-  removeDir,
-  sweepStale,
-  toPng,
-  writeBase64,
-} from './host'
-import type { Host } from './host'
+import { capture, notePaths, offerPaneAgain } from './capture'
+import { ensureDir, host, hostFor, imagePaths, openExternally, removeDir, sweepStale, writeBase64 } from './host'
 import {
   MAX_KEPT,
-  addDraft,
   drafts,
   dropDrafts,
   forRow,
@@ -36,35 +19,18 @@ import {
   unread,
 } from './list'
 import { INLINE, draw, forget, graphics, warm } from './picture'
-import { begin, claim, isLive, keep, pictures, reset } from './pictures'
+import { begin, claim, finish, isLive, keep, pictures, reset } from './pictures'
 import type { Work } from './pictures'
-import { isDebugOn, isFullscreen, later, noteViewport, probe, toggleDebug } from './session'
+import { PANE, isDebugOn, isFullscreen, later, noteViewport, probe, toggleDebug } from './session'
 
 type $ = EngineInterface
-
-const PANE = 'image-peek'
 
 const selected = atom({ plugin: 'image-peek', key: 'selected' } as const, null)
 /** Fewest rows a hover preview is drawn in; with fewer the band shows a hint. */
 const MIN_CARD_ROWS = 6
 
-// Module state: rebuilt after a reload, and nothing drawn depends on it alone.
-let isPaneOffered = false
-/** The clipboard's change counter at the last grab: unchanged means no new image was copied. */
-let lastChange: number | undefined
-const inFlight = new Set<number>()
-/** Image paths a paste named, for a placeholder the engine puts in a moment later. */
-const recentPaths: { path: string; at: number }[] = []
-/** Screenshots already taken for a draft, so a second placeholder gets the next one. */
-const usedShots = new Set<string>()
-let isDeniedTold = false
-
 /** The hover group that ties a message's chip to its preview in the band. */
 const scopeOf = (img: PeekImage) => `peek-${img.id}`.slice(0, 64)
-
-let stamps = 0
-/** A file-name stamp no other capture or copy shares, even in the same millisecond. */
-const uniqueStamp = async ($: $) => `${await $.clock.now()}-${++stamps}`
 
 /** Drops the session's pictures (see `reset`) and what was kept to draw them. */
 async function resetPictures($: $, files: 'delete' | 'leave') {
@@ -76,119 +42,6 @@ async function setImages($: $, work: Work, change: (list: PeekImage[]) => PeekIm
   const { isKept, dropped } = await keep($, work, change)
   for (const img of dropped) forget(img)
   return isKept
-}
-
-/** Makes the PNG and its two thumbnails, and reads the thumbnail's size; a step file the work made goes when it ends. */
-async function finish(
-  $: $,
-  work: Work,
-  h: Host,
-  base: Pick<PeekImage, 'id' | 'n' | 'source' | 'messageId' | 'promptText'> & { file: string },
-): Promise<PeekImage | undefined> {
-  let path = base.file
-  if (!/\.png$/i.test(path)) {
-    const png = claim(work, h, `${base.id}.png`)
-    if (!(await toPng($, h, path, png))) return undefined
-    path = png
-  }
-  const thumb = claim(work, h, `${base.id}.thumb.png`)
-  const shown = (await toPng($, h, path, thumb, 800)) ? thumb : path
-  const small = claim(work, h, `${base.id}.small.png`)
-  const smallShown = (await toPng($, h, shown, small, 400)) ? small : shown
-  const { width, height } = await pngSize($, shown)
-  const { file: _file, ...rest } = base
-  return { ...rest, path, thumb: shown, small: smallShown, width, height, addedAt: await $.clock.now() }
-}
-
-/** Copies files a drop or paste named, at once: macOS deletes a screenshot thumbnail's temporary file soon after. */
-async function copyDropped($: $, work: Work, paths: string[]) {
-  const h = await host($)
-  await ensureDir($, h)
-  const home = (await $.env.get('HOME')) ?? ''
-  const copies: string[] = []
-  for (const [i, path] of paths.entries()) {
-    const from = await linuxPath($, h, path.startsWith('~/') ? home + path.slice(1) : path)
-    const ext = from.match(/\.[A-Za-z0-9]+$/)?.[0] ?? '.png'
-    const copy = claim(work, h, `drop-${await uniqueStamp($)}-${i}${ext}`)
-    if (await copyFile($, h, from, copy)) copies.push(copy)
-  }
-  return copies
-}
-
-/**
- * Saves the picture behind each new "[Image #N]" of the draft: from the file
- * the same paste named, else the clipboard, when it holds an image copied
- * since the last grab. `files` are copies the work made; what no kept picture
- * takes goes when the work ends.
- */
-async function captureDraft($: $, options: PluginOptions, work: Work, ns: number[], via: string, files: string[] = []) {
-  if (!isLive(work)) return
-  const h = await host($)
-  await ensureDir($, h)
-  for (const [i, n] of ns.entries()) {
-    // Claimed before any wait, so a second capture of this number stops here.
-    if (inFlight.has(n)) continue
-    inFlight.add(n)
-    try {
-      const id = `draft-${n}-${await uniqueStamp($)}`
-      if (hasDraft(await pictures($), n)) continue
-      let file = files[i]
-      let source: PeekSource = 'file'
-      if (!file) {
-        source = 'clipboard'
-        const out = claim(work, h, `${id}.png`)
-        const grab = await grabClipboard($, h, out)
-        const isStale = grab.change !== undefined && grab.change === lastChange
-        void probe($, 'clipboard', { n, via, isStale, ...grab, file: grab.file !== undefined })
-        if (grab.change !== undefined) lastChange = grab.change
-        if (!isStale && grab.file && isImageFile(grab.file)) {
-          const [copy] = await copyDropped($, work, [grab.file])
-          file = copy
-          source = 'file'
-        } else if (!isStale && grab.isSaved) {
-          file = out
-        } else {
-          // No new image on the clipboard: either a file was dropped (the
-          // engine turned its path into the placeholder unseen), likely a
-          // screenshot saved in the last two minutes, or the same clipboard
-          // image was pasted again. A guess either way: the sent bytes replace it.
-          const { path: shot, isDenied } = await recentScreenshot($, h, 120_000, usedShots)
-          void probe($, 'screenshot', { n, isFound: shot !== undefined, isDenied })
-          if (shot) {
-            usedShots.add(shot)
-            const [copy] = await copyDropped($, work, [shot])
-            file = copy
-            source = 'file'
-          } else if (grab.isSaved) {
-            file = out
-          } else if (grab.file && isImageFile(grab.file)) {
-            const [copy] = await copyDropped($, work, [grab.file])
-            file = copy
-            source = 'file'
-          } else if (isDenied && !isDeniedTold) {
-            isDeniedTold = true
-            $.ui.toast('image-peek: macOS hides dropped screenshots until sent. Paste with Ctrl+V, or give your terminal Full Disk Access.')
-          }
-        }
-      }
-      if (!file) {
-        $.ui.toast(`Image #${n}: it will show once sent.`)
-        continue
-      }
-      const entry = isLive(work) ? await finish($, work, h, { id, n, source, file }) : undefined
-      if (!entry) continue
-      // The draft may have been sent or edited while the picture was made.
-      if (!isLive(work) || !(await $.prompt.read()).text.includes(`[Image #${n}]`)) continue
-      if (!(await setImages($, work, list => addDraft(list, entry)))) continue
-      await warm($, options, entry)
-      if (options.autoOpenPane === true && isFullscreen() && !isPaneOffered) {
-        isPaneOffered = true
-        await $.ui.open({ id: PANE, title: 'Images' })
-      }
-    } finally {
-      inFlight.delete(n)
-    }
-  }
 }
 
 /** Keeps the bytes a stored prompt carried: the pictures exactly as the model got them. */
@@ -283,7 +136,7 @@ export const register: Register = (on, options) => {
     await update($, selected, () => null)
     const old = await hostFor($, e.sessionId)
     if (e.reason === 'clear' || e.reason === 'resume') {
-      isPaneOffered = false
+      offerPaneAgain()
       later($, 'switch', async work => {
         await removeDir($, old)
         if (e.reason === 'resume') await loadHistory($, options, work)
@@ -306,14 +159,8 @@ export const register: Register = (on, options) => {
     if (isPaste || added.length > 0 || paths.length > 0 || e.inputText.includes('[Image #')) {
       void probe($, 'prompt.edit', { chars: e.inputText.length, isKey: e.key !== undefined, added, paths: paths.length })
     }
-    if (added.length > 0) {
-      // Copied first thing after the edit, before macOS can delete a
-      // screenshot's temporary file; on the clock, not on this dispatch.
-      later($, 'capture', async work => captureDraft($, options, work, added, 'edit', paths.length > 0 ? await copyDropped($, work, paths) : []))
-    } else if (paths.length > 0) {
-      const at = await $.clock.now()
-      recentPaths.push(...paths.map(path => ({ path, at })))
-    }
+    if (added.length > 0) await capture($, options, added, 'edit', paths)
+    else if (paths.length > 0) await notePaths($, paths)
     const removed = before.filter(n => !after.includes(n))
     if (removed.length > 0) {
       later($, 'prune', work => setImages($, work, list => dropDrafts(list, n => removed.includes(n))))
@@ -332,12 +179,7 @@ export const register: Register = (on, options) => {
       void probe($, 'prompt.change', { origin: e.origin.kind, present })
       const list = await pictures($)
       const missing = present.filter(n => !hasDraft(list, n))
-      if (missing.length > 0) {
-        const at = await $.clock.now()
-        const paths = recentPaths.splice(0).filter(p => at - p.at < 3_000).map(p => p.path)
-        const via = `change:${e.origin.kind}`
-        later($, 'capture', async work => captureDraft($, options, work, missing, via, paths.length > 0 ? await copyDropped($, work, paths) : []))
-      }
+      if (missing.length > 0) await capture($, options, missing, `change:${e.origin.kind}`)
     }
     return result
   }).catch(($, e, next) => next(e))
