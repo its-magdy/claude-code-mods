@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
 import type { PeekImage } from '../types'
@@ -377,4 +377,107 @@ test('a resumed row is read back unless this session sent as many rows of its te
   expect(unread([sentOnce], [row(2, 'a'), row(7, 'b')]).map(r => r.idPrefix)).toEqual(['hist-7'])
   // A row read back on an earlier load is not read again.
   expect(unread([{ ...SHOT, id: 'hist-7-1' }], [row(7, 'b')])).toEqual([])
+})
+
+// A 1 x 2 BMP, red over blue: every cell it is scaled to reads red on top, blue below.
+const tinyBmp = () => {
+  const bmp = new Uint8Array(54 + 8)
+  const view = new DataView(bmp.buffer)
+  bmp[0] = 0x42
+  bmp[1] = 0x4d
+  view.setUint32(10, 54, true)
+  view.setUint32(14, 40, true)
+  view.setInt32(18, 1, true)
+  view.setInt32(22, 2, true)
+  view.setUint16(28, 24, true)
+  bmp.set(Uint8Array.of(0xff, 0, 0, 0, 0, 0, 0xff, 0), 54)
+  return toBase64(bmp)
+}
+
+test('blocks: a sent picture draws a placeholder, then its cells once made off the drawing', { options: { graphics: 'blocks' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const runs: string[] = []
+  on('state.get', seed({ images: [SHOT], isDebug: false }))
+  on('env.get', noEnv)
+  on('process.run', (_, e) => {
+    runs.push(e.argv[0]!)
+    return { value: { exitCode: 0, stdout: e.argv[0] === 'uname' ? 'Darwin 25.0.0' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('fs.read', () => ({ value: { base64: tinyBmp() } }))
+  on('fs.list', () => ({ value: [] }))
+  on('session.id', () => ({ value: 'test-session' }))
+  const logs: string[] = []
+  on('ui.log', (_, e) => {
+    logs.push(JSON.stringify(e))
+    return { value: undefined }
+  })
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+
+  const row = await $.ui.mount({
+    plugin: 'image-peek',
+    surface: 'terminal',
+    component: 'UserMessage',
+    requestId: 'msg-1',
+    viewport: { columns: 100, rows: 40, isFullscreen: false },
+    props: { text: 'fix the margin in [Image #1]', origin: { kind: 'composer' }, isExpanded: false },
+  })
+  // No process runs while drawing: the first drawing holds a placeholder.
+  expect(await row.find({ type: 'Raster' })).toBeUndefined()
+  expect(await row.find({ type: 'Text', text: /\[Image 1…\]/ })).toBeDefined()
+
+  await clock.settle()
+  const raster = await row.find({ type: 'Raster' })
+  // 800 x 400 in the 28 x 8 inline box: 28 columns, 7 rows of cells.
+  expect(logs).toEqual([])
+  expect([raster?.props.columns, raster?.props.rows]).toEqual([28, 7])
+  expect(runs).toContain('sips')
+  await row.unmount()
+})
+
+test('blocks: a picture cleared and then restored at the same path draws its cells again', { options: { graphics: 'blocks' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  // A store the mod can write: `/peek clear` empties the list.
+  const stored = new Map<string, unknown>([['images', { shape: 'images-2', value: [SHOT] }]])
+  let version = 1
+  on('state.get', (_, e) => ({ value: { value: stored.get(e.key), version } }))
+  on('state.set', (_, e) => {
+    stored.set(e.key, e.value)
+    return { value: { isSet: true, version: ++version } }
+  })
+  on('env.get', noEnv)
+  on('session.id', () => ({ value: 'test-session' }))
+  on('process.run', (_, e) => ({
+    value: { exitCode: 0, stdout: e.argv[0] === 'uname' ? 'Darwin 25.0.0' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  }))
+  on('fs.read', () => ({ value: { base64: tinyBmp() } }))
+  on('fs.list', () => ({ value: [] }))
+  on('ui.log', () => ({ value: undefined }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  const ROW = {
+    plugin: 'image-peek',
+    surface: 'terminal',
+    component: 'UserMessage',
+    requestId: 'msg-1',
+    viewport: { columns: 100, rows: 40, isFullscreen: false },
+    props: { text: 'fix the margin in [Image #1]', origin: { kind: 'composer' }, isExpanded: false },
+  } as const
+  const drawsCells = async () => {
+    const row = await $.ui.mount(ROW)
+    await clock.settle()
+    const raster = await row.find({ type: 'Raster' })
+    await row.unmount()
+    return raster !== undefined
+  }
+
+  expect(await drawsCells()).toBe(true)
+  await $.command.run({ command: 'peek', args: 'clear', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  // A resumed session reads the same row back to the same file names.
+  stored.set('images', { shape: 'images-2', value: [SHOT] })
+  expect(await drawsCells()).toBe(true)
 })
