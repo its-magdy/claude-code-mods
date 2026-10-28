@@ -1,5 +1,5 @@
 // The session's pictures: the image list, the generation, and the files
-// work makes for it. Work names each file it makes here; when the work ends,
+// work makes for it (`finish` makes a picture's PNG and thumbnails). Work names each file it makes here; when the work ends,
 // whatever no kept picture owns is deleted. A new generation (a session end,
 // /clear, /resume, /peek clear) outlives the work begun before it: that work
 // stops before it changes the list, and its files go when it ends.
@@ -8,7 +8,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
 import type { PeekImage } from '../types'
-import { host, join, removeFiles } from './host'
+import { host, join, pngSize, removeFiles, toPng } from './host'
 import type { Host } from './host'
 import { capped } from './list'
 
@@ -103,4 +103,26 @@ export async function reset($: $, files: 'delete' | 'leave') {
   })
   if (files === 'delete') await removeAll($, dropped)
   return dropped
+}
+
+/** Makes the PNG and its two thumbnails, and reads the thumbnail's size; a step file the work made goes when it ends. */
+export async function finish(
+  $: $,
+  work: Work,
+  h: Host,
+  base: Pick<PeekImage, 'id' | 'n' | 'source' | 'messageId' | 'promptText'> & { file: string },
+): Promise<PeekImage | undefined> {
+  let path = base.file
+  if (!/\.png$/i.test(path)) {
+    const png = claim(work, h, `${base.id}.png`)
+    if (!(await toPng($, h, path, png))) return undefined
+    path = png
+  }
+  const thumb = claim(work, h, `${base.id}.thumb.png`)
+  const shown = (await toPng($, h, path, thumb, 800)) ? thumb : path
+  const small = claim(work, h, `${base.id}.small.png`)
+  const smallShown = (await toPng($, h, shown, small, 400)) ? small : shown
+  const { width, height } = await pngSize($, shown)
+  const { file: _file, ...rest } = base
+  return { ...rest, path, thumb: shown, small: smallShown, width, height, addedAt: await $.clock.now() }
 }
