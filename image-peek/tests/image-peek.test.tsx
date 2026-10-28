@@ -589,3 +589,26 @@ test('a stored prompt whose picture cannot be converted leaves no files behind',
   await clock.settle()
   expect(left()).toEqual(['.lease'])
 })
+
+test('a resumed session reads its prompts\' pictures back from the conversation', { options: { graphics: 'file' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const left = fakeMac(on, true)
+  on('session.messages', () => ({
+    value: [
+      { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'hi' }] },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'look at [Image #2]' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } },
+        ],
+      },
+    ],
+  }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  expect(left()).toEqual(['.lease', 'hist-2-2.png', 'hist-2-2.small.png', 'hist-2-2.thumb.png'])
+})
