@@ -269,7 +269,9 @@ async function keepPrompt(
   if (kept.length === 0) return
   const isMade = await setImages($, born, list => storePrompt(list, kept, { messageId: where.messageId, text }))
   if (!isMade) return drop()
-  for (const img of kept) await warm($, options, img)
+  // The cap may have left out the oldest of these; only listed pictures get cells.
+  const listed = await read($, images)
+  for (const img of kept) if (listed.some(entry => entry.id === img.id)) await warm($, options, img)
 }
 
 /** A resumed session's pictures, read back from the conversation; each user row by its place, so equal texts stay apart. */

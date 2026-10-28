@@ -37,12 +37,10 @@ let isTmux = false
 const CELL_CHARS = (RASTER.columns * RASTER.rows * 12 * 4) / 3
 const pngCache = new Lru<string | null>(32 * 1024 * 1024, value => value?.length ?? 0)
 const cellCache = new Lru<string | null>((MAX_KEPT * 3 + 1) * CELL_CHARS, value => value?.length ?? 0)
-/** Cells being made, by key: the drawing and `warm` share one job, and so one BMP file. */
-const cellJobs = new Map<string, Promise<void>>()
+/** Cells being made, by key: the drawing and `warm` share one job, and so one BMP file. `forget` voids a job under way. */
+const cellJobs = new Map<string, { done: Promise<void>; isVoid: boolean }>()
 /** Keys a drawing waits on until their cells are in, with the generation that asked: a newer one drops the waiter unrun. */
 const cellAsked = new Map<string, number>()
-/** Pictures `forget` let go of, by their small PNG: cells made for one after are not kept. */
-const forgotten = new Set<string>()
 
 /** How this terminal can show a picture: the setting, else a guess from its env. */
 export async function graphics($: $, options: PluginOptions): Promise<Mode> {
@@ -109,13 +107,15 @@ function makeCells($: $, img: PeekImage, size: Size) {
   if (cellCache.has(key)) return Promise.resolve()
   let job = cellJobs.get(key)
   if (!job) {
-    job = convertCells($, img, size, key, generation()).finally(() => cellJobs.delete(key))
-    cellJobs.set(key, job)
+    const made = { done: Promise.resolve(), isVoid: false }
+    made.done = convertCells($, img, size, key, generation(), made).finally(() => cellJobs.delete(key))
+    cellJobs.set(key, made)
+    job = made
   }
-  return job
+  return job.done
 }
 
-async function convertCells($: $, img: PeekImage, size: Size, key: string, born: number) {
+async function convertCells($: $, img: PeekImage, size: Size, key: string, born: number, job: { isVoid: boolean }) {
   const h = await host($)
   const bmp = join(h, `${img.id}-${size.columns}x${size.rows}.bmp`)
   const ok = await toBmp($, h, img.small, bmp, size.columns, size.rows * 2)
@@ -123,7 +123,7 @@ async function convertCells($: $, img: PeekImage, size: Size, key: string, born:
   // The cells are all that's kept; each window size would leave a BMP behind.
   await removeFiles($, h, [], [`${img.id}-${size.columns}x${size.rows}.bmp`])
   // Dropped while its cells were made: keep nothing for a picture that's gone.
-  if (forgotten.has(img.small) || born !== generation()) return
+  if (job.isVoid || born !== generation()) return
   cellCache.set(key, base64 ? (bmpToCells(base64, size.columns, size.rows) ?? null) : null)
 }
 
@@ -193,7 +193,7 @@ export async function warm($: $, options: PluginOptions, img: PeekImage) {
 
 /** Lets go of what was kept to draw a picture that left the list. */
 export function forget(img: PeekImage) {
-  forgotten.add(img.small)
+  for (const [key, job] of cellJobs) if (key.startsWith(`${img.small}|`)) job.isVoid = true
   pngCache.delete(img.thumb)
   pngCache.delete(img.small)
   cellCache.deleteWhere(key => key.startsWith(`${img.small}|`))
