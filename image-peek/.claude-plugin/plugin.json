@@ -1,7 +1,7 @@
 {
   "name": "image-peek",
   "displayName": "Image Peek",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "See the images you paste: thumbnails above the prompt while you type, previews on sent messages (on hover in fullscreen), a pane, and /peek N for a big view.",
   "author": {
     "name": "Mohamed Omar",
