@@ -79,11 +79,17 @@ function world(on: On, options: { clipboard: Clipboard; prompt: string; onRun?: 
         if (clipboard.isImage) files.add(name(argv.at(-1)!))
         return ok(JSON.stringify({ change: clipboard.change, types: clipboard.types, isSaved: clipboard.isImage || undefined }))
       }
-      case 'sips':
+      // Each reads a file of the folder, and fails as the real one does when it is not there.
+      case 'sips': {
+        const from = argv[argv.indexOf('--out') - 1]!
+        if (!from.startsWith(`${DIR}/`) || !files.has(name(from))) return ran(1, '', 'no such file')
         files.add(name(argv.at(-1)!))
         return ok()
-      case 'sh':
-        return ok(pngHead(800, 400))
+      }
+      case 'sh': {
+        const path = argv.at(-1)!
+        return path.startsWith(`${DIR}/`) && files.has(name(path)) ? ok(pngHead(800, 400)) : ran(1, '', 'no such file')
+      }
       case 'rm':
         for (const path of argv.slice(argv.indexOf('--') + 1)) files.delete(name(path))
         return ok()
