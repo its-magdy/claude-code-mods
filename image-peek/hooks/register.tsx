@@ -2,12 +2,12 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { PeekImage } from '../types'
-import { capture, notePaths, offerPaneAgain } from './capture'
+import { changed, edited, offerPaneAgain, submitted } from './capture'
 import { chip, hoverChip, hoverable, preview } from './chips'
-import { ensureDir, host, hostFor, imagePaths, openExternally, removeDir, sweepStale } from './host'
-import { drafts, dropDrafts, forRow, hasDraft, latest, placeholders, sent, tagDrafts } from './list'
+import { ensureDir, host, hostFor, openExternally, removeDir, sweepStale } from './host'
+import { drafts, forRow, latest, sent } from './list'
 import { INLINE, draw, graphics } from './picture'
-import { keep, later, pictures, reset, run } from './pictures'
+import { later, pictures, reset } from './pictures'
 import { PANE, isDebugOn, isFullscreen, noteViewport, probe, toggleDebug } from './session'
 import { keepSent, loadHistory } from './stored'
 
@@ -67,55 +67,25 @@ export const register: Register = (on, options) => {
     return ended
   })
 
-  // A paste or a drop: an "[Image #N]" it leaves in the box is captured from
-  // the file the paste named, else from the clipboard.
+  // The draft's pictures: what a paste, a drop or an engine insert put in
+  // the box, and the tag a submit gives them (see capture.ts).
   on('prompt.edit', async ($, e, next) => {
-    const before = placeholders(e.text)
-    const paths = imagePaths(e.inputText)
     const box = await next(e)
-    const after = placeholders(box.text)
-    const added = after.filter(n => !before.includes(n))
-    const isPaste = e.key === undefined && e.inputText.length > 1
-    if (isPaste || added.length > 0 || paths.length > 0 || e.inputText.includes('[Image #')) {
-      void probe($, 'prompt.edit', { chars: e.inputText.length, isKey: e.key !== undefined, added, paths: paths.length })
-    }
-    if (added.length > 0) await capture($, options, added, 'edit', paths)
-    else if (paths.length > 0) await notePaths($, paths)
-    const removed = before.filter(n => !after.includes(n))
-    if (removed.length > 0) {
-      later($, 'prune', work => keep($, work, list => dropDrafts(list, n => removed.includes(n))))
-    }
+    await edited($, options, e, box)
     return box
   }).catch(($, e, next) => next(e))
 
-  // The box changed with no edit (an engine insert, a plugin's fill): catch
-  // a placeholder the edit hook never saw. A clear drops untagged drafts.
   on('prompt.change', async ($, e, next) => {
     const result = await next(e)
-    const present = placeholders(e.text)
-    if (e.origin.kind === 'clear') {
-      later($, 'prune', work => keep($, work, list => dropDrafts(list, n => !present.includes(n))))
-    } else if (present.length > 0 && e.origin.kind !== 'history') {
-      void probe($, 'prompt.change', { origin: e.origin.kind, present })
-      const list = await pictures($)
-      const missing = present.filter(n => !hasDraft(list, n))
-      if (missing.length > 0) await capture($, options, missing, `change:${e.origin.kind}`)
-    }
+    await changed($, options, e)
     return result
   }).catch(($, e, next) => next(e))
 
-  // Tags the draft's pictures with the prompt's text before its row draws, so
-  // the row finds them even before the stored bytes arrive.
+  // Tags the draft's pictures before the prompt's row draws, so the row
+  // finds them even before the stored bytes arrive.
   on('prompt.submit', async ($, e, next) => {
     const result = await next(e)
-    const attached = e.attachments?.filter(a => a.type === 'image') ?? []
-    if (attached.length > 0 || e.text.includes('[Image #')) {
-      void probe($, 'prompt.submit', {
-        chars: e.text.length,
-        attachments: attached.map(a => a.mediaType),
-      })
-      await run($, work => keep($, work, list => tagDrafts(list, e.text)))
-    }
+    await submitted($, e)
     return result
   }).catch(($, e, next) => next(e))
 
