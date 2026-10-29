@@ -11,10 +11,11 @@ import type { EngineInterface, PluginOptions, PromptBox, PromptChangeInput, Prom
 import type { PeekSource } from '../types'
 import { copyFile, ensureDir, grabClipboard, host, imagePaths, isImageFile, linuxPath, recentScreenshot } from './host'
 import { addDraft, dropDrafts, hasDraft, placeholders, tagDrafts } from './list'
+import { offerPane } from './pane'
 import { warm } from './picture'
 import { claim, finish, isLive, keep, later, pictures, run } from './pictures'
 import type { Work } from './pictures'
-import { PANE, isFullscreen, probe } from './session'
+import { probe } from './session'
 
 type $ = EngineInterface
 
@@ -27,7 +28,6 @@ const recentPaths: { path: string; at: number }[] = []
 /** Screenshots already taken for a draft, so a second placeholder gets the next one. */
 const usedShots = new Set<string>()
 let isDeniedTold = false
-let isPaneOffered = false
 
 let stamps = 0
 /** A file-name stamp no other capture or copy shares, even in the same millisecond. */
@@ -99,11 +99,6 @@ function capture($: $, options: PluginOptions, ns: number[], via: string, paths:
   // Copied first thing after the edit, before macOS can delete a
   // screenshot's temporary file; on the clock, not on this dispatch.
   later($, 'capture', async work => captureDraft($, options, work, ns, via, paths.length > 0 ? await copyDropped($, work, paths) : []))
-}
-
-/** Lets the next pasted picture open the pane again (a new session, after /clear or /resume). */
-export function offerPaneAgain() {
-  isPaneOffered = false
 }
 
 /** Copies files a drop or paste named, at once: macOS deletes a screenshot thumbnail's temporary file soon after. */
@@ -186,10 +181,7 @@ async function captureDraft($: $, options: PluginOptions, work: Work, ns: number
       if (!isLive(work) || !(await $.prompt.read()).text.includes(`[Image #${n}]`)) continue
       if (!(await keep($, work, list => addDraft(list, entry)))) continue
       await warm($, options, entry)
-      if (options.autoOpenPane === true && isFullscreen() && !isPaneOffered) {
-        isPaneOffered = true
-        await $.ui.open({ id: PANE, title: 'Images' })
-      }
+      await offerPane($, options)
     } finally {
       inFlight.delete(n)
     }

@@ -612,3 +612,52 @@ test('a resumed session reads its prompts\' pictures back from the conversation'
   await clock.settle()
   expect(left()).toEqual(['.lease', 'hist-2-2.png', 'hist-2-2.small.png', 'hist-2-2.thumb.png'])
 })
+
+test("a sent row's chip opens the pane on its picture; Back goes to the list", async ($, on) => {
+  const stored = new Map<string, unknown>([['images', { shape: 'images-2', value: [SHOT] }]])
+  on('state.get', (_, e) => ({ value: { value: stored.get(e.key), version: 1 } }))
+  on('state.set', (_, e) => {
+    stored.set(e.key, e.value)
+    return { value: { isSet: true, version: 2 } }
+  })
+  const opened: { focus?: boolean }[] = []
+  on('ui.open', (_, e) => {
+    opened.push({ focus: e.focus })
+    return { value: { isPlaced: true } }
+  })
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  const row = await $.ui.mount({
+    plugin: 'image-peek',
+    surface: 'desktop',
+    component: 'UserMessage',
+    requestId: 'msg-1',
+    props: { text: 'fix the margin in [Image #1]', origin: { kind: 'composer' }, isExpanded: false },
+  })
+  await row.press({ key: 'peek-msg-1-1' })
+  await row.unmount()
+  expect(opened).toEqual([{ focus: true }])
+
+  const pane = await $.ui.mount({
+    plugin: 'image-peek',
+    surface: 'desktop',
+    component: 'Pane',
+    requestId: 'image-peek',
+    props: { title: 'Images', isFocused: true, bodyColumns: 40, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
+  })
+  expect((await pane.find({ type: 'Text', text: /^Image 1$/ }))?.text).toBe('Image 1')
+  await pane.press({ key: 'back' })
+  await pane.unmount()
+  const list = await $.ui.mount({
+    plugin: 'image-peek',
+    surface: 'desktop',
+    component: 'Pane',
+    requestId: 'image-peek',
+    props: { title: 'Images', isFocused: true, bodyColumns: 40, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
+  })
+  expect((await list.find({ type: 'Text', text: /^Sent$/ }))?.text).toBe('Sent')
+  expect(await list.find({ key: 'back' })).toBeUndefined()
+  await list.unmount()
+})

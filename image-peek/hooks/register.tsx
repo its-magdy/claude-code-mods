@@ -1,29 +1,20 @@
-import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { PeekImage } from '../types'
-import { changed, edited, offerPaneAgain, submitted } from './capture'
+import { changed, edited, submitted } from './capture'
 import { chip, hoverChip, hoverable, preview } from './chips'
 import { ensureDir, host, hostFor, openExternally, removeDir, sweepStale } from './host'
 import { drafts, forRow, latest, sent } from './list'
 import { INLINE, draw, graphics } from './picture'
+import { PANE, drawPane, openPane, resetPane } from './pane'
 import { later, pictures, reset } from './pictures'
-import { PANE, isDebugOn, isFullscreen, noteViewport, probe, toggleDebug } from './session'
+import { isDebugOn, isFullscreen, noteViewport, probe, toggleDebug } from './session'
 import { keepSent, loadHistory } from './stored'
 
 type $ = EngineInterface
 
-const selected = atom({ plugin: 'image-peek', key: 'selected' } as const, null)
 /** Fewest rows a hover preview is drawn in; with fewer the band shows a hint. */
 const MIN_CARD_ROWS = 6
-
-/** Opens the pane the person asked for: it takes the keys, and Escape closes it. */
-const openPane = ($: $) => $.ui.open({ id: PANE, title: 'Images', focus: true, closeOnEscape: true })
-
-async function select($: $, img: PeekImage) {
-  await update($, selected, () => img.id)
-  await openPane($)
-}
 
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
@@ -53,10 +44,9 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     const ended = await next(e)
     await reset($, 'leave')
-    await update($, selected, () => null)
+    await resetPane($, 'session')
     const old = await hostFor($, e.sessionId)
     if (e.reason === 'clear' || e.reason === 'resume') {
-      offerPaneAgain()
       later($, 'switch', async work => {
         await removeDir($, old)
         if (e.reason === 'resume') await loadHistory($, options, work)
@@ -113,7 +103,7 @@ export const register: Register = (on, options) => {
     const hovered = canHover ? hoverable(list) : []
     if (inPrompt.length === 0 && hovered.length === 0) return next(e)
     const { Box } = $.ui.resolve(e)
-    const label = (img: PeekImage) => chip($, e, img, 'band', () => select($, img))
+    const label = (img: PeekImage) => chip($, e, img, 'band', () => openPane($, img))
     if (e.surface !== 'terminal') {
       return (
         <Box flexDirection="row" gap={2}>
@@ -141,7 +131,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="row" gap={canHover ? 2 : 3}>
             {inPrompt.map((img, i) =>
               canHover ? (
-                hoverChip($, e, img, 'band', () => select($, img))
+                hoverChip($, e, img, 'band', () => openPane($, img))
               ) : (
                 <Box key={`band-${img.id}`} flexDirection="column">
                   {label(img)}
@@ -176,7 +166,7 @@ export const register: Register = (on, options) => {
           {own}
           <Box flexDirection="row" gap={2}>
             {mine.map(img => (
-              <Button key={`peek-${img.id}`} plain label={`▣ Image ${img.n}`} onPress={() => select($, img)} />
+              <Button key={`peek-${img.id}`} plain label={`▣ Image ${img.n}`} onPress={() => openPane($, img)} />
             ))}
           </Box>
         </Box>
@@ -206,7 +196,7 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column">
         {own}
         <Box flexDirection="row" gap={2} marginLeft={2}>
-          {mine.map(img => hoverChip($, e, img, 'message', () => select($, img)))}
+          {mine.map(img => hoverChip($, e, img, 'message', () => openPane($, img)))}
         </Box>
       </Box>
     )
@@ -214,70 +204,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     noteViewport(e.viewport)
-    const { Box, Button, Text } = $.ui.resolve(e)
-    const list = await pictures($)
-    const selectedId = await read($, selected)
-    const chosen = list.find(img => img.id === selectedId)
-    const columns = Math.max(10, e.props.bodyColumns - 1)
-    const rows = Math.max(6, e.props.scroll.bodyRows - 3)
-    const closeButton = <Button key="close" label="Close" hotkey="c" role="dismiss" onPress={() => $.ui.close({ id: PANE })} />
-    // The pane gets the keys on open only over an empty prompt; with a draft
-    // they stay there, and Esc and the hotkeys reach the pane once it is focused.
-    const keysHint = e.props.isFocused ? 'Esc closes' : 'click here to use keys'
-
-    if (chosen) {
-      const big = e.surface === 'terminal' ? await draw($, e, options, chosen, 'big', columns, rows) : undefined
-      return (
-        <Box flexDirection="column">
-          <Box flexDirection="row" gap={2}>
-            <Text bold>Image {chosen.n}</Text>
-            <Text dimColor>{chosen.source}</Text>
-            <Button key="back" label="Back" hotkey="b" onPress={() => update($, selected, () => null)} />
-            <Button key="open" label="Open" hotkey="o" onPress={async () => void openExternally($, await host($), chosen.path)} />
-            {closeButton}
-            <Text dimColor>{keysHint}</Text>
-          </Box>
-          {big ?? <Text dimColor>{chosen.path}</Text>}
-        </Box>
-      )
-    }
-
-    if (list.length === 0) {
-      return (
-        <Box flexDirection="column">
-          <Text dimColor>No images yet.</Text>
-          <Text dimColor>Paste one into the prompt (Ctrl+V; Alt+V on Windows) or drop a file.</Text>
-        </Box>
-      )
-    }
-
-    const section = async (title: string, items: PeekImage[]) => {
-      if (items.length === 0) return []
-      const pics = e.surface === 'terminal' ? await Promise.all(items.map(img => draw($, e, options, img, 'pane', columns, 10))) : []
-      return [
-        <Text key={`title-${title}`} bold>
-          {title}
-        </Text>,
-        ...items.map((img, i) => (
-          <Box key={`row-${img.id}`} flexDirection="column" marginBottom={1}>
-            <Button key={`sel-${img.id}`} plain onPress={() => select($, img)}>
-              <Text color="cyan">▣ Image {img.n}</Text> <Text dimColor>{img.source}</Text>
-            </Button>
-            {pics[i]}
-          </Box>
-        )),
-      ]
-    }
-    return (
-      <Box flexDirection="column">
-        <Box flexDirection="row" gap={2}>
-          {closeButton}
-          <Text dimColor>{keysHint}</Text>
-        </Box>
-        {await section('In your prompt', drafts(list))}
-        {await section('Sent', sent(list))}
-      </Box>
-    )
+    return drawPane($, e, options)
   })
 
   on('command.run', { command: 'peek' }, async ($, e) => {
@@ -288,12 +215,11 @@ export const register: Register = (on, options) => {
     }
     if (first === 'clear') {
       await reset($, 'delete')
-      await update($, selected, () => null)
+      await resetPane($, 'list')
       return { text: 'Image list cleared.' }
     }
     const list = await pictures($)
     if (first === undefined) {
-      await update($, selected, () => null)
       const { isPlaced } = await openPane($)
       return { text: `${list.length} image${list.length === 1 ? '' : 's'}${isPlaced ? '' : ' (no surface draws the pane here)'}.` }
     }
@@ -305,7 +231,7 @@ export const register: Register = (on, options) => {
       const isOpened = await openExternally($, await host($), img.path)
       return { text: isOpened ? `Opened Image #${n} in the system viewer.` : `Could not open ${img.path}.` }
     }
-    await select($, img)
+    await openPane($, img)
     return { text: `Showing Image #${n}.` }
   })
 }
