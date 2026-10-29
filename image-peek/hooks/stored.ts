@@ -7,10 +7,10 @@
 import type { ApiContentBlock, EngineInterface, PluginOptions } from 'claude-code'
 
 import type { PeekImage, PeekSource } from '../types'
-import { ensureDir, host, writeBase64 } from './host'
+import { writeBase64 } from './host'
 import { MAX_KEPT, placeholders, storePrompt, textOf, unread } from './list'
 import { warm } from './picture'
-import { claim, finish, isLive, keep, pictures } from './pictures'
+import { claim, finish, folder, isLive, keep, pictures } from './pictures'
 import type { Work } from './pictures'
 import { probe } from './session'
 
@@ -28,8 +28,7 @@ async function keepPrompt(
   if (blocks.length === 0) return
   const text = textOf(content)
   const named = placeholders(text)
-  const h = await host($)
-  await ensureDir($, h)
+  const h = await folder($, work)
 
   // What isn't kept (a failed write or conversion, a list a /peek clear or
   // a switch got to first) goes when the work ends; an earlier, listed copy
@@ -42,9 +41,9 @@ async function keepPrompt(
     const n = named[i] ?? i + 1
     const ext = (source.media_type ?? 'image/png').split('/')[1]?.replace('jpeg', 'jpg') ?? 'png'
     const id = `${where.idPrefix}-${n}`
-    const raw = claim(work, h, `${id}.${ext}`)
+    const raw = await claim($, work, `${id}.${ext}`)
     const entry = (await writeBase64($, h, source.data, raw))
-      ? await finish($, work, h, { id, n, source: where.source, file: raw, messageId: where.messageId, promptText: text })
+      ? await finish($, work, { id, n, source: where.source, file: raw, messageId: where.messageId, promptText: text })
       : undefined
     if (entry) kept.push(entry)
   }

@@ -1,7 +1,8 @@
 // The session's pictures: the image list, the generation, and the files
 // work makes for it (`finish` makes a picture's PNG and thumbnails). Work is
 // had only through `later` or `run`, which end it: it names each file it
-// makes here, and when it ends, whatever no kept picture owns is deleted. A
+// makes here, in the session folder it finds and makes on first use, and
+// when it ends, whatever no kept picture owns is deleted. A
 // new generation (a session end, /clear, /resume, /peek clear) outlives the
 // work begun before it: that work stops before it changes the list, and its
 // files go when it ends.
@@ -10,7 +11,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
 import type { PeekImage } from '../types'
-import { host, join, pngSize, removeFiles, toPng } from './host'
+import { ensureDir, host, join, pngSize, removeFiles, toPng } from './host'
 import type { Host } from './host'
 import { capped } from './list'
 import { forget } from './picture'
@@ -24,26 +25,39 @@ const images = atom({ plugin: 'image-peek', key: 'images' } as const, [], { shap
 
 let generation = 0
 
-/** Work of one generation, and the files it made. */
-export type Work = { readonly born: number; readonly files: Map<string, Host> }
+/** Work of one generation, its session folder once asked for, and the files it made there. */
+export type Work = { readonly born: number; folder?: Promise<Host>; readonly files: Set<string> }
 
 /** A path's last part: the name `removeFiles` matches. */
 const fileName = (path: string) => path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1)
 
 /** Work of the current generation. */
-const begin = (): Work => ({ born: generation, files: new Map() })
+const begin = (): Work => ({ born: generation, files: new Set() })
 
 /** False once a newer generation began: the work should stop. */
 export const isLive = (work: Work) => work.born === generation
 
 /**
- * A path in the session's folder for the work to make; deleted when the work
- * ends, unless a kept picture owns it. Code that writes into the folder takes
- * its path from here: a file written past it is never deleted.
+ * The session folder the work makes its files in: found and made (its lease
+ * renewed) on the first ask, and the same for the rest of the work, a
+ * session switch or not.
  */
-export function claim(work: Work, h: Host, name: string) {
-  const path = join(h, name)
-  work.files.set(path, h)
+export function folder($: $, work: Work) {
+  work.folder ??= host($).then(async h => {
+    await ensureDir($, h)
+    return h
+  })
+  return work.folder
+}
+
+/**
+ * A path in the work's folder for it to make; deleted when the work ends,
+ * unless a kept picture owns it. Code that writes into the folder takes its
+ * path from here: a file written past it is never deleted.
+ */
+export async function claim($: $, work: Work, name: string) {
+  const path = join(await folder($, work), name)
+  work.files.add(path)
   return path
 }
 
@@ -90,17 +104,11 @@ async function release($: $, dropped: readonly PeekImage[], files: 'delete' | 'l
 
 /** Deletes the files the work made that no kept picture owns. */
 async function end($: $, work: Work) {
-  if (work.files.size === 0) return
+  if (work.files.size === 0 || !work.folder) return
   const owned = new Set((await read($, images)).flatMap(img => [img.path, img.thumb, img.small]))
-  const byDir = new Map<string, { h: Host; names: string[] }>()
-  for (const [path, h] of work.files) {
-    if (owned.has(path)) continue
-    const group = byDir.get(h.dir) ?? { h, names: [] }
-    group.names.push(fileName(path))
-    byDir.set(h.dir, group)
-  }
+  const names = [...work.files].filter(path => !owned.has(path)).map(fileName)
   work.files.clear()
-  for (const { h, names } of byDir.values()) await removeFiles($, h, [], names)
+  await removeFiles($, await work.folder, [], names)
 }
 
 /**
@@ -121,18 +129,18 @@ export async function reset($: $, files: 'delete' | 'leave') {
 export async function finish(
   $: $,
   work: Work,
-  h: Host,
   base: Pick<PeekImage, 'id' | 'n' | 'source' | 'messageId' | 'promptText'> & { file: string },
 ): Promise<PeekImage | undefined> {
+  const h = await folder($, work)
   let path = base.file
   if (!/\.png$/i.test(path)) {
-    const png = claim(work, h, `${base.id}.png`)
+    const png = await claim($, work, `${base.id}.png`)
     if (!(await toPng($, h, path, png))) return undefined
     path = png
   }
-  const thumb = claim(work, h, `${base.id}.thumb.png`)
+  const thumb = await claim($, work, `${base.id}.thumb.png`)
   const shown = (await toPng($, h, path, thumb, 800)) ? thumb : path
-  const small = claim(work, h, `${base.id}.small.png`)
+  const small = await claim($, work, `${base.id}.small.png`)
   const smallShown = (await toPng($, h, shown, small, 400)) ? small : shown
   const { width, height } = await pngSize($, shown)
   const { file: _file, ...rest } = base
