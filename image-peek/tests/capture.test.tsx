@@ -1,4 +1,4 @@
-import type { On, PromptChangeInput } from 'claude-code'
+import type { On, PromptChangeInput, PromptEditInput } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
@@ -28,6 +28,10 @@ const pngHead = (width: number, height: number) => {
 const promptChange = ($: Parameters<TestBody>[0], e: PromptChangeInput) =>
   ($.prompt as unknown as { change: (e: PromptChangeInput) => Promise<unknown> }).change(e)
 
+/** Raises `prompt.edit` as the person's paste or keystroke does. */
+const promptEdit = ($: Parameters<TestBody>[0], e: PromptEditInput) =>
+  ($.prompt as unknown as { edit: (e: PromptEditInput) => Promise<unknown> }).edit(e)
+
 const ran = (exitCode: number, stdout = '', stderr = '') => ({
   value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false },
 })
@@ -38,11 +42,12 @@ type Clipboard = { change: number; types: string[]; isImage: boolean }
  * The world beneath the mod for a capture: stored values in memory, a
  * session folder the processes write to and `rm` empties, the clipboard as
  * `osascript` reads it, the prompt box, and the screenshots on the Desktop
- * (HOME unset: `/Desktop`), saved when the clock started.
+ * (HOME unset: `/Desktop`), saved when the clock started; `disk` holds other
+ * files a paste may name.
  */
 function world(
   on: On,
-  options: { clipboard: Clipboard; prompt: string; desktop?: string[]; onRun?: (argv: readonly string[]) => void },
+  options: { clipboard: Clipboard; prompt: string; desktop?: string[]; disk?: string[]; onRun?: (argv: readonly string[]) => void },
 ) {
   const clock = mock.clock(on)
   const stored = new Map<string, unknown>()
@@ -64,6 +69,10 @@ function world(
   })
   on('ui.log', () => ({ value: undefined }))
   on('prompt.change', (_, e) => ({ text: e.text }))
+  on('prompt.edit', (_, e) => {
+    const text = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
+    return { text, cursor: e.start + e.inputText.length }
+  })
   on('fs.write', (_, e) => {
     if (e.path.startsWith(`${DIR}/`)) files.add(name(e.path))
     return { value: undefined }
@@ -97,7 +106,9 @@ function world(
       }
       case 'cp': {
         const [from, to] = [argv[1]!, argv[2]!]
-        const isThere = from.startsWith(`${DIR}/`) ? files.has(name(from)) : (options.desktop ?? []).some(file => from === `/Desktop/${file}`)
+        const isThere = from.startsWith(`${DIR}/`)
+          ? files.has(name(from))
+          : (options.desktop ?? []).some(file => from === `/Desktop/${file}`) || (options.disk ?? []).includes(from)
         if (!isThere || !to.startsWith(`${DIR}/`)) return ran(1, '', 'no such file')
         files.add(name(to))
         return ok()
@@ -203,4 +214,27 @@ test('the same clipboard image pasted again, with no recent screenshot, is taken
 
   const second = w.list().find(img => img.n === 2)
   expect([second?.source, second ? name(second.path) : undefined]).toEqual(['clipboard', `${second?.id}.png`])
+})
+
+test('an image path pasted with no placeholder is where the one the engine puts in next comes from', { options: { graphics: 'off' } }, async ($, on) => {
+  const cat = '/Pictures/cat.png'
+  const w = world(on, { clipboard: { change: 9, types: ['public.utf8-plain-text'], isImage: false }, prompt: '', disk: [cat] })
+  await promptEdit($, { origin: { kind: 'composer' }, text: '', cursor: 0, start: 0, end: 0, inputText: cat })
+  await paste($, w, '[Image #1]')
+
+  const [img] = w.list()
+  expect([img?.n, img?.source]).toEqual([1, 'file'])
+  expect(img?.path).toMatch(/\/drop-[0-9-]+\.png$/)
+})
+
+test('a placeholder deleted from the draft takes its picture and files with it', { options: { graphics: 'off' } }, async ($, on) => {
+  const w = world(on, { clipboard: PNG_CLIPBOARD, prompt: '' })
+  await paste($, w, '[Image #1]')
+  expect(w.list()).toHaveLength(1)
+
+  w.setPrompt('')
+  await promptEdit($, { origin: { kind: 'composer' }, text: '[Image #1]', cursor: 10, start: 0, end: 10, inputText: '' })
+  await w.clock.settle()
+  expect(w.list()).toEqual([])
+  expect([...w.files]).toEqual(['.lease'])
 })

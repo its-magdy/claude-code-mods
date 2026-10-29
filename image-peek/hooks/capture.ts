@@ -1,16 +1,18 @@
-// Draft capture: where the picture behind a new "[Image #N]" in the draft
-// comes from. The file the same paste named, else the clipboard when it holds
-// an image copied since the last grab, else a screenshot saved just now (a
-// file dropped into the prompt reaches the engine unseen). The prompt hooks
-// hand over the placeholders; what to read, and when, is decided here.
+// Draft intake: the pictures behind the draft's "[Image #N]". The prompt
+// hooks hand over each event and the box it left; which placeholders came,
+// went or are missing, and where each picture comes from, is decided here.
+// The file the same paste named, else the clipboard when it holds an image
+// copied since the last grab, else a screenshot saved just now (a file
+// dropped into the prompt reaches the engine unseen). A submit tags the
+// draft's pictures with the prompt's text.
 
-import type { EngineInterface, PluginOptions } from 'claude-code'
+import type { EngineInterface, PluginOptions, PromptBox, PromptChangeInput, PromptEditInput, PromptSubmitInput } from 'claude-code'
 
 import type { PeekSource } from '../types'
-import { copyFile, ensureDir, grabClipboard, host, isImageFile, linuxPath, recentScreenshot } from './host'
-import { addDraft, hasDraft } from './list'
+import { copyFile, ensureDir, grabClipboard, host, imagePaths, isImageFile, linuxPath, recentScreenshot } from './host'
+import { addDraft, dropDrafts, hasDraft, placeholders, tagDrafts } from './list'
 import { warm } from './picture'
-import { claim, finish, isLive, keep, later, pictures } from './pictures'
+import { claim, finish, isLive, keep, later, pictures, run } from './pictures'
 import type { Work } from './pictures'
 import { PANE, isFullscreen, probe } from './session'
 
@@ -20,7 +22,7 @@ type $ = EngineInterface
 /** The clipboard's change counter at the last grab: unchanged means no new image was copied. */
 let lastChange: number | undefined
 const inFlight = new Set<number>()
-/** Image paths a paste named, for a placeholder the engine puts in a moment later. */
+/** Image paths a paste named with no placeholder, for one the engine puts in a moment later. */
 const recentPaths: { path: string; at: number }[] = []
 /** Screenshots already taken for a draft, so a second placeholder gets the next one. */
 const usedShots = new Set<string>()
@@ -34,26 +36,69 @@ async function uniqueStamp($: $) {
 }
 
 /**
- * Captures the pictures behind the draft's new placeholders `ns`, after the
- * hook that asked has answered. `paths` are the image files the same paste
- * named; left out, those a paste named in the last 3 s (see `notePaths`).
+ * A keystroke or paste, and the box it left: the placeholders it put in are
+ * captured, from the files the paste named; image paths it named with no
+ * placeholder yet are kept for one the engine puts in a moment later; the
+ * drafts of placeholders it took out are dropped.
  */
-export async function capture($: $, options: PluginOptions, ns: number[], via: string, paths?: string[]) {
-  let named = paths
-  if (!named) {
-    const at = await $.clock.now()
-    named = recentPaths.splice(0).filter(p => at - p.at < 3_000).map(p => p.path)
+export async function edited($: $, options: PluginOptions, e: PromptEditInput, box: PromptBox) {
+  const before = placeholders(e.text)
+  const after = placeholders(box.text)
+  const paths = imagePaths(e.inputText)
+  const added = after.filter(n => !before.includes(n))
+  const isPaste = e.key === undefined && e.inputText.length > 1
+  if (isPaste || added.length > 0 || paths.length > 0 || e.inputText.includes('[Image #')) {
+    void probe($, 'prompt.edit', { chars: e.inputText.length, isKey: e.key !== undefined, added, paths: paths.length })
   }
-  const files = named
-  // Copied first thing after the edit, before macOS can delete a
-  // screenshot's temporary file; on the clock, not on this dispatch.
-  later($, 'capture', async work => captureDraft($, options, work, ns, via, files.length > 0 ? await copyDropped($, work, files) : []))
+  if (added.length > 0) {
+    capture($, options, added, 'edit', paths)
+  } else if (paths.length > 0) {
+    const at = await $.clock.now()
+    recentPaths.push(...paths.map(path => ({ path, at })))
+  }
+  const removed = before.filter(n => !after.includes(n))
+  if (removed.length > 0) {
+    later($, 'prune', work => keep($, work, list => dropDrafts(list, n => removed.includes(n))))
+  }
 }
 
-/** Keeps the image paths a paste named with no placeholder yet, for one the engine puts in a moment later. */
-export async function notePaths($: $, paths: string[]) {
+/**
+ * The box changed with no edit (an engine insert, a plugin's fill): a
+ * placeholder the edit never saw is captured, from the paths a paste named
+ * in the last 3 s. A clear drops the drafts no placeholder names.
+ */
+export async function changed($: $, options: PluginOptions, e: PromptChangeInput) {
+  const present = placeholders(e.text)
+  if (e.origin.kind === 'clear') {
+    later($, 'prune', work => keep($, work, list => dropDrafts(list, n => !present.includes(n))))
+    return
+  }
+  if (present.length === 0 || e.origin.kind === 'history') return
+  void probe($, 'prompt.change', { origin: e.origin.kind, present })
+  const list = await pictures($)
+  const missing = present.filter(n => !hasDraft(list, n))
+  if (missing.length === 0) return
   const at = await $.clock.now()
-  recentPaths.push(...paths.map(path => ({ path, at })))
+  const paths = recentPaths.splice(0).filter(p => at - p.at < 3_000).map(p => p.path)
+  capture($, options, missing, `change:${e.origin.kind}`, paths)
+}
+
+/** A prompt sent with pictures: the draft's are tagged with its text, so its row finds them before the stored bytes arrive. */
+export async function submitted($: $, e: PromptSubmitInput) {
+  const attached = e.attachments?.filter(a => a.type === 'image') ?? []
+  if (attached.length === 0 && !e.text.includes('[Image #')) return
+  void probe($, 'prompt.submit', { chars: e.text.length, attachments: attached.map(a => a.mediaType) })
+  await run($, work => keep($, work, list => tagDrafts(list, e.text)))
+}
+
+/**
+ * Captures the pictures behind the draft's new placeholders `ns`, from the
+ * image files `paths` at their places, after the hook that asked has answered.
+ */
+function capture($: $, options: PluginOptions, ns: number[], via: string, paths: string[]) {
+  // Copied first thing after the edit, before macOS can delete a
+  // screenshot's temporary file; on the clock, not on this dispatch.
+  later($, 'capture', async work => captureDraft($, options, work, ns, via, paths.length > 0 ? await copyDropped($, work, paths) : []))
 }
 
 /** Lets the next pasted picture open the pane again (a new session, after /clear or /resume). */
