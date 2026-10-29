@@ -9,11 +9,11 @@
 import type { EngineInterface, PluginOptions, PromptBox, PromptChangeInput, PromptEditInput, PromptSubmitInput } from 'claude-code'
 
 import type { PeekSource } from '../types'
-import { copyFile, ensureDir, grabClipboard, host, imagePaths, isImageFile, linuxPath, recentScreenshot } from './host'
+import { copyFile, grabClipboard, imagePaths, isImageFile, linuxPath, recentScreenshot } from './host'
 import { addDraft, dropDrafts, hasDraft, placeholders, tagDrafts } from './list'
 import { offerPane } from './pane'
 import { warm } from './picture'
-import { claim, finish, isLive, keep, later, pictures, run } from './pictures'
+import { claim, finish, folder, isLive, keep, later, pictures, run } from './pictures'
 import type { Work } from './pictures'
 import { probe } from './session'
 
@@ -103,14 +103,13 @@ function capture($: $, options: PluginOptions, ns: number[], via: string, paths:
 
 /** Copies files a drop or paste named, at once: macOS deletes a screenshot thumbnail's temporary file soon after. */
 async function copyDropped($: $, work: Work, paths: string[]) {
-  const h = await host($)
-  await ensureDir($, h)
+  const h = await folder($, work)
   const home = (await $.env.get('HOME')) ?? ''
   const copies: string[] = []
   for (const [i, path] of paths.entries()) {
     const from = await linuxPath($, h, path.startsWith('~/') ? home + path.slice(1) : path)
     const ext = from.match(/\.[A-Za-z0-9]+$/)?.[0] ?? '.png'
-    const copy = claim(work, h, `drop-${await uniqueStamp($)}-${i}${ext}`)
+    const copy = await claim($, work, `drop-${await uniqueStamp($)}-${i}${ext}`)
     if (await copyFile($, h, from, copy)) copies.push(copy)
   }
   return copies
@@ -123,8 +122,7 @@ async function copyDropped($: $, work: Work, paths: string[]) {
  */
 async function captureDraft($: $, options: PluginOptions, work: Work, ns: number[], via: string, files: string[]) {
   if (!isLive(work)) return
-  const h = await host($)
-  await ensureDir($, h)
+  const h = await folder($, work)
   for (const [i, n] of ns.entries()) {
     // Claimed before any wait, so a second capture of this number stops here.
     if (inFlight.has(n)) continue
@@ -136,7 +134,7 @@ async function captureDraft($: $, options: PluginOptions, work: Work, ns: number
       let source: PeekSource = 'file'
       if (!file) {
         source = 'clipboard'
-        const out = claim(work, h, `${id}.png`)
+        const out = await claim($, work, `${id}.png`)
         const grab = await grabClipboard($, h, out)
         const isStale = grab.change !== undefined && grab.change === lastChange
         void probe($, 'clipboard', { n, via, isStale, ...grab, file: grab.file !== undefined })
@@ -175,7 +173,7 @@ async function captureDraft($: $, options: PluginOptions, work: Work, ns: number
         $.ui.toast(`Image #${n}: it will show once sent.`)
         continue
       }
-      const entry = isLive(work) ? await finish($, work, h, { id, n, source, file }) : undefined
+      const entry = isLive(work) ? await finish($, work, { id, n, source, file }) : undefined
       if (!entry) continue
       // The draft may have been sent or edited while the picture was made.
       if (!isLive(work) || !(await $.prompt.read()).text.includes(`[Image #${n}]`)) continue

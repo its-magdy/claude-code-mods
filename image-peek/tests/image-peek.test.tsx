@@ -428,6 +428,8 @@ test('blocks: a sent picture draws a placeholder, then its cells once made off t
   })
   on('fs.read', () => ({ value: { base64: tinyBmp() } }))
   on('fs.list', () => ({ value: [] }))
+  // The cells' work makes the session folder, renewing its lease.
+  on('fs.write', () => ({ value: undefined }))
   on('session.id', () => ({ value: 'test-session' }))
   const logs: string[] = []
   on('ui.log', (_, e) => {
@@ -478,6 +480,7 @@ test('blocks: a picture cleared and then restored at the same path draws its cel
   let bmp = tinyBmp()
   on('fs.read', () => ({ value: { base64: bmp } }))
   on('fs.list', () => ({ value: [] }))
+  on('fs.write', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)

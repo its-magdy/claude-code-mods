@@ -7,10 +7,10 @@ import type { EngineInterface, PluginOptions, RenderElement, RenderInput } from 
 
 import type { PeekImage } from '../types'
 import { Lru } from './cache'
-import { host, toBmp } from './host'
+import { toBmp } from './host'
 import { MAX_KEPT } from './list'
 import { bmpToCells } from './raster'
-import { claim, isLive, later, run } from './pictures'
+import { claim, folder, isLive, later, run } from './pictures'
 import type { Work } from './pictures'
 import { isFullscreen, probe } from './session'
 
@@ -120,8 +120,13 @@ function makeCells($: $, img: PeekImage, size: Size) {
 async function convertCells($: $, img: PeekImage, size: Size, key: string, job: { isVoid: boolean }) {
   // The cells are all that's kept; each window size would leave a BMP behind.
   await run($, async work => {
-    const h = await host($)
-    const bmp = claim(work, h, `${img.id}-${size.columns}x${size.rows}.bmp`)
+    // A folder that can't be made can't hold the BMP: no cells, not a retry each drawing.
+    const h = await folder($, work).catch(() => undefined)
+    if (!h) {
+      if (!job.isVoid && isLive(work)) cellCache.set(key, null)
+      return
+    }
+    const bmp = await claim($, work, `${img.id}-${size.columns}x${size.rows}.bmp`)
     const ok = await toBmp($, h, img.small, bmp, size.columns, size.rows * 2)
     const { base64 } = ok ? await $.fs.read(bmp, { as: 'bytes' }).catch(() => ({ base64: '' })) : { base64: '' }
     // Dropped while its cells were made: keep nothing for a picture that's gone.
