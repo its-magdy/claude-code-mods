@@ -7,7 +7,7 @@
 
 import type { EngineInterface, NextBudget, SessionEndInput } from 'claude-code'
 
-import { platform, powershell, quotePs, run } from './host'
+import { osOf, platform } from './host'
 import type { Host } from './host'
 
 type $ = EngineInterface
@@ -33,7 +33,7 @@ async function hostFor($: $, sessionId: string): Promise<Host> {
   const session = sessionId.replace(/[^A-Za-z0-9_-]/g, '') || 'unnamed'
   const known = cached.get(session)
   if (known) return known
-  const os = await platform($)
+  const os = await osOf($)
   let root: string
   if (os === 'windows') {
     root = `${(await $.env.get('LOCALAPPDATA')) ?? (await $.env.get('TEMP')) ?? 'C:\\Windows\\Temp'}\\claude-image-peek`
@@ -59,9 +59,7 @@ export async function makeFolder($: $): Promise<Host> {
   const h = await host($)
   await $.fs.write(join(h, LEASE), String(await $.clock.now()))
   if (made.has(h.dir)) return h
-  if (h.os !== 'windows') {
-    await run($, ['chmod', '700', h.dir.slice(0, h.dir.lastIndexOf('/')), h.dir])
-  }
+  await (await platform($)).makePrivate(h.dir)
   made.add(h.dir)
   return h
 }
@@ -74,12 +72,7 @@ export async function removeFiles($: $, h: Host, ids: readonly string[], exact: 
     name => exact.includes(name) || ids.some(id => name.startsWith(`${id}.`) || name.startsWith(`${id}-`)),
   )
   if (doomed.length === 0) return
-  const paths = doomed.map(name => join(h, name))
-  if (h.os === 'windows') {
-    await powershell($, `Remove-Item -LiteralPath ${paths.map(quotePs).join(', ')} -Force -ErrorAction SilentlyContinue`)
-  } else {
-    await run($, ['rm', '-f', '--', ...paths])
-  }
+  await (await platform($)).removeFiles(doomed.map(name => join(h, name)))
 }
 
 /**
@@ -131,9 +124,5 @@ async function removeDir($: $, h: Host) {
   // Only ever a session's own folder under ours: never the parent, never empty.
   if (!/claude-image-peek[\\/][A-Za-z0-9_-]+$/.test(h.dir)) return
   made.delete(h.dir)
-  if (h.os === 'windows') {
-    await powershell($, `Remove-Item -LiteralPath ${quotePs(h.dir)} -Recurse -Force -ErrorAction SilentlyContinue`)
-  } else {
-    await run($, ['rm', '-rf', h.dir])
-  }
+  await (await platform($)).removeDir(h.dir)
 }

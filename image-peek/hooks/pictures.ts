@@ -13,7 +13,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { PeekImage } from '../types'
 import { host, join, makeFolder, removeFiles } from './folder'
-import { pngSize, toPng } from './host'
+import { platform, pngSize } from './host'
 import type { Host } from './host'
 import { capped } from './list'
 import { forget } from './picture'
@@ -143,18 +143,18 @@ export async function finish(
   base: Pick<PeekImage, 'id' | 'n' | 'source' | 'messageId' | 'promptText'> & { file: string },
 ): Promise<PeekImage | undefined> {
   stopIfStale(work)
-  const h = await folder($, work)
+  const p = await platform($)
   let path = base.file
   if (!/\.png$/i.test(path)) {
     const png = await claim($, work, `${base.id}.png`)
-    if (!(await toPng($, h, path, png))) return undefined
+    if (!(await p.toPng(path, png))) return undefined
     path = png
   }
   const thumb = await claim($, work, `${base.id}.thumb.png`)
-  const shown = (await toPng($, h, path, thumb, 800)) ? thumb : path
+  const shown = (await p.toPng(path, thumb, 800)) ? thumb : path
   const small = await claim($, work, `${base.id}.small.png`)
-  const smallShown = (await toPng($, h, shown, small, 400)) ? small : shown
-  const { width, height } = await pngSize($, shown)
+  const smallShown = (await p.toPng(shown, small, 400)) ? small : shown
+  const { width, height } = await pngSize(p, shown)
   const { file: _file, ...rest } = base
   return { ...rest, path, thumb: shown, small: smallShown, width, height, addedAt: await $.clock.now() }
 }

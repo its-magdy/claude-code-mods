@@ -9,7 +9,7 @@
 import type { EngineInterface, PluginOptions, PromptBox, PromptChangeInput, PromptEditInput, PromptSubmitInput } from 'claude-code'
 
 import type { PeekSource } from '../types'
-import { copyFile, grabClipboard, imagePaths, isImageFile, linuxPath, recentScreenshot } from './host'
+import { imagePaths, isImageFile, platform } from './host'
 import { addDraft, dropDrafts, hasDraft, placeholders, tagDrafts } from './list'
 import { offerPane } from './pane'
 import { warm } from './picture'
@@ -103,14 +103,14 @@ function capture($: $, options: PluginOptions, ns: number[], via: string, paths:
 
 /** Copies files a drop or paste named, at once: macOS deletes a screenshot thumbnail's temporary file soon after. */
 async function copyDropped($: $, work: Work, paths: string[]) {
-  const h = await folder($, work)
+  const p = await platform($)
   const home = (await $.env.get('HOME')) ?? ''
   const copies: string[] = []
   for (const [i, path] of paths.entries()) {
-    const from = await linuxPath($, h, path.startsWith('~/') ? home + path.slice(1) : path)
+    const from = await p.localPath(path.startsWith('~/') ? home + path.slice(1) : path)
     const ext = from.match(/\.[A-Za-z0-9]+$/)?.[0] ?? '.png'
     const copy = await claim($, work, `drop-${await uniqueStamp($)}-${i}${ext}`)
-    if (await copyFile($, h, from, copy)) copies.push(copy)
+    if (await p.copyFile(from, copy)) copies.push(copy)
   }
   return copies
 }
@@ -164,9 +164,9 @@ async function pickSource(
   file: string | undefined,
 ): Promise<{ file: string; source: PeekSource } | undefined> {
   if (file) return { file, source: 'file' }
-  const h = await folder($, work)
+  const p = await platform($)
   const out = await claim($, work, `${id}.png`)
-  const grab = await grabClipboard($, h, out)
+  const grab = await p.grabClipboard(out)
   const isStale = grab.change !== undefined && grab.change === lastChange
   void probe($, 'clipboard', { n, via, isStale, ...grab, file: grab.file !== undefined })
   if (grab.change !== undefined) lastChange = grab.change
@@ -177,7 +177,7 @@ async function pickSource(
   // turned its path into the placeholder unseen), likely a screenshot saved
   // in the last two minutes, or the same clipboard image was pasted again.
   // A guess either way: the sent bytes replace it.
-  const { path: shot, isDenied } = await recentScreenshot($, h, 120_000, usedShots)
+  const { path: shot, isDenied } = await p.recentScreenshot(120_000, usedShots)
   void probe($, 'screenshot', { n, isFound: shot !== undefined, isDenied })
   if (shot) {
     usedShots.add(shot)

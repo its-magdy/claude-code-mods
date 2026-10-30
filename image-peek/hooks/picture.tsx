@@ -7,7 +7,7 @@ import type { EngineInterface, PluginOptions, RenderElement, RenderInput } from 
 
 import type { PeekImage } from '../types'
 import { Lru } from './cache'
-import { toBmp } from './host'
+import { platform } from './host'
 import { MAX_KEPT } from './list'
 import { bmpToCells } from './raster'
 import { claim, folder, isLive, later, run } from './pictures'
@@ -127,7 +127,7 @@ async function convertCells($: $, img: PeekImage, size: Size, key: string, job: 
       return
     }
     const bmp = await claim($, work, `${img.id}-${size.columns}x${size.rows}.bmp`)
-    const ok = await toBmp($, h, img.small, bmp, size.columns, size.rows * 2)
+    const ok = await (await platform($)).toBmp(img.small, bmp, size.columns, size.rows * 2)
     const { base64 } = ok ? await $.fs.read(bmp, { as: 'bytes' }).catch(() => ({ base64: '' })) : { base64: '' }
     // Dropped while its cells were made (a newer generation drops every
     // listed picture): keep nothing for a picture that's gone.
