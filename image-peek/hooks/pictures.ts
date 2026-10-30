@@ -11,7 +11,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
 import type { PeekImage } from '../types'
-import { ensureDir, host, join, pngSize, removeFiles, toPng } from './host'
+import { host, join, makeFolder, removeFiles } from './folder'
+import { pngSize, toPng } from './host'
 import type { Host } from './host'
 import { capped } from './list'
 import { forget } from './picture'
@@ -43,10 +44,7 @@ export const isLive = (work: Work) => work.born === generation
  * session switch or not.
  */
 export function folder($: $, work: Work) {
-  work.folder ??= host($).then(async h => {
-    await ensureDir($, h)
-    return h
-  })
+  work.folder ??= makeFolder($)
   return work.folder
 }
 
