@@ -1,20 +1,14 @@
-import type { EngineInterface, Register } from 'claude-code'
+import type { Register } from 'claude-code'
 
-import type { PeekImage } from '../types'
 import { changed, edited, submitted } from './capture'
-import { chip, hoverChip, hoverable, preview } from './chips'
+import { drawBand, drawRow } from './chips'
 import { ensureDir, host, hostFor, openExternally, removeDir, sweepStale } from './host'
-import { drafts, forRow, latest, sent } from './list'
-import { INLINE, draw, graphics } from './picture'
+import { latest } from './list'
+import { graphics } from './picture'
 import { PANE, drawPane, openPane, resetPane } from './pane'
 import { later, pictures, reset } from './pictures'
-import { isDebugOn, isFullscreen, noteViewport, probe, toggleDebug } from './session'
+import { noteViewport, toggleDebug } from './session'
 import { keepSent, loadHistory } from './stored'
-
-type $ = EngineInterface
-
-/** Fewest rows a hover preview is drawn in; with fewer the band shows a hint. */
-const MIN_CARD_ROWS = 6
 
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
@@ -91,115 +85,16 @@ export const register: Register = (on, options) => {
     return stored
   }).catch(($, e, next) => next(e))
 
-  // The band above the prompt: a thumbnail for each image in the draft, so a
-  // paste shows at once where you type. A click shows it big in the pane.
+  // The band above the prompt and a sent prompt's row: a chip per picture,
+  // pressed to show it big in the pane (see chips.tsx).
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     noteViewport(e.viewport)
-    if (e.props.hasSurvey) return next(e)
-    const list = await pictures($)
-    const inPrompt = drafts(list)
-    const canHover = e.surface === 'terminal' && isFullscreen()
-    // Pictures hidden until a chip is hovered (see chips.tsx).
-    const hovered = canHover ? hoverable(list) : []
-    if (inPrompt.length === 0 && hovered.length === 0) return next(e)
-    const { Box } = $.ui.resolve(e)
-    const label = (img: PeekImage) => chip($, e, img, 'band', () => openPane($, img))
-    if (e.surface !== 'terminal') {
-      return (
-        <Box flexDirection="row" gap={2}>
-          {inPrompt.map(label)}
-        </Box>
-      )
-    }
-    // A preview, its title and the chip row fit the band whole: taller, it
-    // scrolls, and the chips go out from under the pointer, the hover stuck.
-    // With too little room (a small window, a tall prompt, a turn running)
-    // a one-line hint stands in for a picture too small to see.
-    const room = e.props.maxRows - (inPrompt.length > 0 ? 1 : 0)
-    const bigRows = room - 1
-    const hasRoom = bigRows >= MIN_CARD_ROWS
-    const previews = hasRoom
-      ? await Promise.all(hovered.map(img => draw($, e, options, img, 'card', e.props.bodyColumns - 2, bigRows)))
-      : []
-    // With no pointer (the main screen) the draft's thumbnails show outright.
-    const rows = Math.max(2, Math.min(INLINE.rows, e.props.maxRows - 1))
-    const pics = canHover ? [] : await Promise.all(inPrompt.map(img => draw($, e, options, img, 'inline', INLINE.columns, rows)))
-    return (
-      <Box flexDirection="column">
-        {room >= 1 && hovered.map((img, i) => preview($, e, img, previews[i]))}
-        {inPrompt.length > 0 && (
-          <Box flexDirection="row" gap={canHover ? 2 : 3}>
-            {inPrompt.map((img, i) =>
-              canHover ? (
-                hoverChip($, e, img, 'band', () => openPane($, img))
-              ) : (
-                <Box key={`band-${img.id}`} flexDirection="column">
-                  {label(img)}
-                  {pics[i]}
-                </Box>
-              ),
-            )}
-          </Box>
-        )}
-      </Box>
-    )
+    return (await drawBand($, e, options)) ?? next(e)
   })
 
-  // A sent prompt with pictures: a chip per image under it. Fullscreen, the
-  // chip shows the picture on hover and opens it in the pane on click; on the
-  // main screen (no pointer) small thumbnails are drawn inline instead.
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     noteViewport(e.viewport)
-    if (!e.props.text.includes('[Image #')) return next(e)
-    const list = await pictures($)
-    const mine = forRow(list, e.requestId, e.props.text)
-    if (await isDebugOn($)) {
-      void probe($, 'UserMessage', { requestId: e.requestId, matched: mine.length, ids: list.map(img => img.messageId) })
-    }
-    if (mine.length === 0) return next(e)
-
-    const own = await next(e)
-    if (e.surface !== 'terminal') {
-      const { Box, Button } = $.ui.resolve(e)
-      return (
-        <Box flexDirection="column">
-          {own}
-          <Box flexDirection="row" gap={2}>
-            {mine.map(img => (
-              <Button key={`peek-${img.id}`} plain label={`▣ Image ${img.n}`} onPress={() => openPane($, img)} />
-            ))}
-          </Box>
-        </Box>
-      )
-    }
-
-    const { Box, Text } = $.ui.resolve(e)
-    if (e.viewport?.isFullscreen !== true) {
-      const thumbs = await Promise.all(mine.map(img => draw($, e, options, img, 'inline', INLINE.columns, INLINE.rows)))
-      return (
-        <Box flexDirection="column">
-          {own}
-          <Box flexDirection="row" flexWrap="wrap" gap={2} marginLeft={2}>
-            {mine.map((img, i) => (
-              <Box key={`thumb-${img.id}`} flexDirection="column">
-                <Text dimColor>Image {img.n}</Text>
-                {thumbs[i]}
-              </Box>
-            ))}
-          </Box>
-        </Box>
-      )
-    }
-
-    // Hovering a chip shows its picture in the band (see chips.tsx).
-    return (
-      <Box flexDirection="column">
-        {own}
-        <Box flexDirection="row" gap={2} marginLeft={2}>
-          {mine.map(img => hoverChip($, e, img, 'message', () => openPane($, img)))}
-        </Box>
-      </Box>
-    )
+    return (await drawRow($, e, options, () => next(e))) ?? next(e)
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
