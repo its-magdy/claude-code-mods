@@ -4,8 +4,9 @@
 // makes here, in the session folder it finds and makes on first use, and
 // when it ends, whatever no kept picture owns is deleted. A
 // new generation (a session end, /clear, /resume, /peek clear) outlives the
-// work begun before it: that work stops before it changes the list, and its
-// files go when it ends.
+// work begun before it: the work's own steps (`claim`, `finish`, `keep`)
+// stop it before it changes the list, `later` and `run` end it quietly, and
+// its files go.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
@@ -34,8 +35,16 @@ const fileName = (path: string) => path.slice(Math.max(path.lastIndexOf('/'), pa
 /** Work of the current generation. */
 const begin = (): Work => ({ born: generation, files: new Set() })
 
-/** False once a newer generation began: the work should stop. */
+/** False once a newer generation began: the work's next step stops it. */
 export const isLive = (work: Work) => work.born === generation
+
+/** What a step of stale work throws; `later` and `run` catch it and end the work. */
+class Stale extends Error {}
+
+/** Stops the work once a newer generation began. */
+function stopIfStale(work: Work) {
+  if (!isLive(work)) throw new Stale('stale work')
+}
 
 /**
  * The session folder the work makes its files in: found and made (its lease
@@ -53,10 +62,11 @@ export function folder($: $, work: Work) {
 /**
  * A path in the work's folder for it to make; deleted when the work ends,
  * unless a kept picture owns it. Code that writes into the folder takes its
- * path from here: a file written past it is never deleted.
+ * path from here: a file written past it is never deleted. Stale work stops here.
  */
 export async function claim($: $, work: Work, name: string) {
   const path = join(await folder($, work), name)
+  stopIfStale(work)
   work.files.add(path)
   return path
 }
@@ -68,11 +78,11 @@ export async function pictures($: $) {
 
 /**
  * Changes the list for the work, capped to the newest MAX_KEPT, and lets go
- * of the entries it drops (see `release`). False when a newer generation came
- * first: the change was not made.
+ * of the entries it drops (see `release`). Stale work stops here, the change
+ * not made.
  */
 export async function keep($: $, work: Work, change: (list: PeekImage[]) => PeekImage[]) {
-  if (!isLive(work)) return false
+  stopIfStale(work)
   let isKept = false
   let dropped: PeekImage[] = []
   await update($, images, list => {
@@ -88,7 +98,7 @@ export async function keep($: $, work: Work, change: (list: PeekImage[]) => Peek
     return next
   })
   await release($, dropped, 'delete')
-  return isKept
+  if (!isKept) throw new Stale('stale work')
 }
 
 /**
@@ -125,12 +135,16 @@ export async function reset($: $, files: 'delete' | 'leave') {
   await release($, dropped, files)
 }
 
-/** Makes the PNG and its two thumbnails, and reads the thumbnail's size; a step file the work made goes when it ends. */
+/**
+ * Makes the PNG and its two thumbnails, and reads the thumbnail's size; a
+ * step file the work made goes when it ends. Stale work stops here.
+ */
 export async function finish(
   $: $,
   work: Work,
   base: Pick<PeekImage, 'id' | 'n' | 'source' | 'messageId' | 'promptText'> & { file: string },
 ): Promise<PeekImage | undefined> {
+  stopIfStale(work)
   const h = await folder($, work)
   let path = base.file
   if (!/\.png$/i.test(path)) {
@@ -150,15 +164,17 @@ export async function finish(
 /**
  * Runs work after the hook that asked for it has answered: the reference puts
  * work that outlives a dispatch on `$.clock`, never on the dispatch itself.
- * The work is of the generation it was asked in; once it ends, the files it
- * made that no kept picture owns are deleted.
+ * The work is of the generation it was asked in: stale, it is not run, or
+ * stops quietly at its next step. Once it ends, the files it made that no
+ * kept picture owns are deleted.
  */
 export function later($: $, label: string, job: (work: Work) => Promise<unknown>, ms = 0) {
   const work = begin()
   $.clock.after(ms, () => {
     if (!isLive(work)) return
     // The error's name only: its message may hold a file path.
-    const failed = (error: unknown) => probe($, `${label} failed`, error instanceof Error ? error.name : typeof error)
+    const failed = (error: unknown) =>
+      error instanceof Stale ? undefined : probe($, `${label} failed`, error instanceof Error ? error.name : typeof error)
     job(work)
       .catch(failed)
       .then(() => end($, work))
@@ -167,11 +183,14 @@ export function later($: $, label: string, job: (work: Work) => Promise<unknown>
   return work
 }
 
-/** Runs work of the current generation now, and ends it. */
-export async function run<T>($: $, job: (work: Work) => Promise<T>) {
+/** Runs work of the current generation now, and ends it; undefined when it stopped stale. */
+export async function run<T>($: $, job: (work: Work) => Promise<T>): Promise<T | undefined> {
   const work = begin()
   try {
     return await job(work)
+  } catch (error) {
+    if (error instanceof Stale) return undefined
+    throw error
   } finally {
     await end($, work)
   }

@@ -47,7 +47,13 @@ type Clipboard = { change: number; types: string[]; isImage: boolean }
  */
 function world(
   on: On,
-  options: { clipboard: Clipboard; prompt: string; desktop?: string[]; disk?: string[]; onRun?: (argv: readonly string[]) => void },
+  options: {
+    clipboard: Clipboard
+    prompt: string
+    desktop?: string[]
+    disk?: string[]
+    onRun?: (argv: readonly string[]) => unknown
+  },
 ) {
   const clock = mock.clock(on)
   const stored = new Map<string, unknown>()
@@ -81,9 +87,9 @@ function world(
   on('fs.list', (_, e) => ({
     value: e.path === DIR ? [...files].map(entry) : e.path === '/Desktop' ? (options.desktop ?? []).map(entry) : [],
   }))
-  on('process.run', (_, e) => {
+  on('process.run', async (_, e) => {
     const argv = e.argv
-    options.onRun?.(argv)
+    await options.onRun?.(argv)
     const ok = (stdout = '') => ran(0, stdout)
     switch (argv[0]) {
       case 'uname':
@@ -180,6 +186,33 @@ test('a picture whose placeholder left the draft while it was made is not kept, 
   expect(w.list()).toEqual([])
   expect([...w.files]).toEqual(['.lease'])
 })
+
+// The clear comes while the thumbnails are made (`sips`), or after, while the
+// thumbnail's size is read (`sh`): the last step before the list changes.
+for (const [step, when] of [
+  ['sips', 'while the thumbnails are made'],
+  ['sh', 'once the thumbnails are made'],
+] as const) {
+  test(`a /peek clear ${when} keeps no picture, and its files go`, { options: { graphics: 'off' } }, async ($, on) => {
+    let isCleared = false
+    const w = world(on, {
+      clipboard: PNG_CLIPBOARD,
+      prompt: '[Image #1]',
+      // The person clears the list while the picture is made; the placeholder stays.
+      onRun: async argv => {
+        if (argv[0] !== step || isCleared) return
+        isCleared = true
+        await $.command.run({ command: 'peek', args: 'clear', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+      },
+    })
+    await promptChange($, { text: '[Image #1]', cursor: 10, origin: { kind: 'engine' } })
+    await w.clock.settle()
+
+    expect(isCleared).toBe(true)
+    expect(w.list()).toEqual([])
+    expect([...w.files]).toEqual(['.lease'])
+  })
+}
 
 /** Pastes "[Image #n]" after what the box holds, as the engine puts a placeholder in. */
 async function paste($: Parameters<TestBody>[0], w: ReturnType<typeof world>, text: string) {

@@ -10,7 +10,7 @@ import type { PeekImage, PeekSource } from '../types'
 import { writeBase64 } from './host'
 import { MAX_KEPT, placeholders, storePrompt, textOf, unread } from './list'
 import { warm } from './picture'
-import { claim, finish, folder, isLive, keep, pictures } from './pictures'
+import { claim, finish, folder, keep, pictures } from './pictures'
 import type { Work } from './pictures'
 import { probe } from './session'
 
@@ -35,7 +35,6 @@ async function keepPrompt(
   // of this row has the same names, so those stay.
   const kept: PeekImage[] = []
   for (const [i, block] of blocks.entries()) {
-    if (!isLive(work)) return
     const source = block.source as { type?: string; media_type?: string; data?: string } | undefined
     if (source?.type !== 'base64' || typeof source.data !== 'string') continue
     const n = named[i] ?? i + 1
@@ -49,7 +48,7 @@ async function keepPrompt(
   }
   void probe($, where.source, { messageId: where.messageId, named, kept: kept.length, chars: text.length })
   if (kept.length === 0) return
-  if (!(await keep($, work, list => storePrompt(list, kept, { messageId: where.messageId, text })))) return
+  await keep($, work, list => storePrompt(list, kept, { messageId: where.messageId, text }))
   // The cap may have left out the oldest of these; only listed pictures get cells.
   const listed = await pictures($)
   for (const img of kept) if (listed.some(entry => entry.id === img.id)) await warm($, options, img)

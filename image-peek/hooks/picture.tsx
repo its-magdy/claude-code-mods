@@ -123,14 +123,15 @@ async function convertCells($: $, img: PeekImage, size: Size, key: string, job: 
     // A folder that can't be made can't hold the BMP: no cells, not a retry each drawing.
     const h = await folder($, work).catch(() => undefined)
     if (!h) {
-      if (!job.isVoid && isLive(work)) cellCache.set(key, null)
+      if (!job.isVoid) cellCache.set(key, null)
       return
     }
     const bmp = await claim($, work, `${img.id}-${size.columns}x${size.rows}.bmp`)
     const ok = await toBmp($, h, img.small, bmp, size.columns, size.rows * 2)
     const { base64 } = ok ? await $.fs.read(bmp, { as: 'bytes' }).catch(() => ({ base64: '' })) : { base64: '' }
-    // Dropped while its cells were made: keep nothing for a picture that's gone.
-    if (job.isVoid || !isLive(work)) return
+    // Dropped while its cells were made (a newer generation drops every
+    // listed picture): keep nothing for a picture that's gone.
+    if (job.isVoid) return
     cellCache.set(key, base64 ? (bmpToCells(base64, size.columns, size.rows) ?? null) : null)
   })
 }
