@@ -13,7 +13,7 @@ import { copyFile, grabClipboard, imagePaths, isImageFile, linuxPath, recentScre
 import { addDraft, dropDrafts, hasDraft, placeholders, tagDrafts } from './list'
 import { offerPane } from './pane'
 import { warm } from './picture'
-import { claim, finish, folder, isLive, keep, later, pictures, run } from './pictures'
+import { claim, finish, folder, keep, later, pictures, run } from './pictures'
 import type { Work } from './pictures'
 import { probe } from './session'
 
@@ -121,7 +121,6 @@ async function copyDropped($: $, work: Work, paths: string[]) {
  * copies the work made; what no kept picture takes goes when the work ends.
  */
 async function captureDraft($: $, options: PluginOptions, work: Work, ns: number[], via: string, files: string[]) {
-  if (!isLive(work)) return
   // The session folder is made even when every placeholder is skipped.
   await folder($, work)
   for (const [i, n] of ns.entries()) {
@@ -136,11 +135,11 @@ async function captureDraft($: $, options: PluginOptions, work: Work, ns: number
         $.ui.toast(`Image #${n}: it will show once sent.`)
         continue
       }
-      const entry = isLive(work) ? await finish($, work, { id, n, ...picked }) : undefined
+      const entry = await finish($, work, { id, n, ...picked })
       if (!entry) continue
       // The draft may have been sent or edited while the picture was made.
-      if (!isLive(work) || !(await $.prompt.read()).text.includes(`[Image #${n}]`)) continue
-      if (!(await keep($, work, list => addDraft(list, entry)))) continue
+      if (!(await $.prompt.read()).text.includes(`[Image #${n}]`)) continue
+      await keep($, work, list => addDraft(list, entry))
       await warm($, options, entry)
       await offerPane($, options)
     } finally {

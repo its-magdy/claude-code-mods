@@ -514,6 +514,61 @@ test('blocks: a picture cleared and then restored at the same path draws its cel
   expect(again).not.toEqual(first)
 })
 
+test('blocks: a /peek clear while cells are made keeps none; the picture restored at the same path draws its own', { options: { graphics: 'blocks' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const stored = new Map<string, unknown>([['images', { shape: 'images-2', value: [SHOT] }]])
+  let version = 1
+  on('state.get', (_, e) => ({ value: { value: stored.get(e.key), version } }))
+  on('state.set', (_, e) => {
+    stored.set(e.key, e.value)
+    return { value: { isSet: true, version: ++version } }
+  })
+  on('env.get', noEnv)
+  on('session.id', () => ({ value: 'test-session' }))
+  let isCleared = false
+  on('process.run', async (_, e) => {
+    // The person clears the list while the first cells' BMP is made.
+    if (e.argv[0] === 'sips' && !isCleared) {
+      isCleared = true
+      await $.command.run({ command: 'peek', args: 'clear', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+    }
+    return { value: { exitCode: 0, stdout: e.argv[0] === 'uname' ? 'Darwin 25.0.0' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  let bmp = tinyBmp()
+  on('fs.read', () => ({ value: { base64: bmp } }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.write', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  const ROW = {
+    plugin: 'image-peek',
+    surface: 'terminal',
+    component: 'UserMessage',
+    requestId: 'msg-1',
+    viewport: { columns: 100, rows: 40, isFullscreen: false },
+    props: { text: 'fix the margin in [Image #1]', origin: { kind: 'composer' }, isExpanded: false },
+  } as const
+  const drawsCells = async () => {
+    const row = await $.ui.mount(ROW)
+    await clock.settle()
+    const raster = await row.find({ type: 'Raster' })
+    await row.unmount()
+    return raster?.props.cells
+  }
+
+  // The cells made after the clear, of the old pixels, are not kept.
+  await drawsCells()
+  expect(isCleared).toBe(true)
+  bmp = tinyBmp(true)
+  stored.set('images', { shape: 'images-2', value: [SHOT] })
+  const again = await drawsCells()
+  expect(again).toBe(bmpToCells(tinyBmp(true), 28, 7))
+  expect(again).not.toBe(bmpToCells(tinyBmp(), 28, 7))
+})
+
 const STORE_DIR = '/t/claude-image-peek/sess-1'
 
 /**
@@ -521,7 +576,7 @@ const STORE_DIR = '/t/claude-image-peek/sess-1'
  * delete, so a test reads what is left behind. `isConverting` says whether
  * sips succeeds.
  */
-function fakeMac(on: Parameters<TestBody>[1], isConverting: boolean) {
+function fakeMac(on: Parameters<TestBody>[1], isConverting: boolean, onRun?: (argv: readonly string[]) => unknown) {
   const files = new Set<string>()
   const ok = (stdout = '') => ({ exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false })
   const failed = { ...ok(), exitCode: 1 }
@@ -537,7 +592,10 @@ function fakeMac(on: Parameters<TestBody>[1], isConverting: boolean) {
       .filter(path => path.slice(0, path.lastIndexOf('/')) === e.path)
       .map(path => ({ name: path.slice(path.lastIndexOf('/') + 1), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })),
   }))
-  on('process.run', (_, e) => ({ value: run(e.argv) }))
+  on('process.run', async (_, e) => {
+    await onRun?.(e.argv)
+    return { value: run(e.argv) }
+  })
   const run = (argv: readonly string[]) => {
     if (argv[0] === 'uname') return ok('Darwin 25.0.0')
     if (argv[0] === 'chmod') return ok()
@@ -590,6 +648,31 @@ test('a stored prompt whose picture cannot be converted leaves no files behind',
   const left = fakeMac(on, false)
   await storeJpeg($)
   await clock.settle()
+  expect(left()).toEqual(['.lease'])
+})
+
+test('a stored prompt still being made when the session switches is not kept, and its files go', { options: { graphics: 'file' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const stored = new Map<string, unknown>()
+  let version = 0
+  on('state.get', (_, e) => ({ value: { value: stored.get(e.key), version } }))
+  on('state.set', (_, e) => {
+    stored.set(e.key, e.value)
+    return { value: { isSet: true, version: ++version } }
+  })
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  let isSwitched = false
+  const left = fakeMac(on, true, async argv => {
+    if (argv[0] !== 'sips' || isSwitched) return
+    isSwitched = true
+    // A /clear while the thumbnails are made: the process goes on under a new id.
+    await $.session.end({ sessionId: 'sess-1', reason: 'clear', resume: { id: 'sess-1' } })
+  })
+  await storeJpeg($)
+  await clock.settle()
+
+  expect(isSwitched).toBe(true)
+  expect(stored.get('images')).toEqual({ shape: 'images-2', value: [] })
   expect(left()).toEqual(['.lease'])
 })
 
