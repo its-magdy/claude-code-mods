@@ -117,12 +117,13 @@ async function copyDropped($: $, work: Work, paths: string[]) {
 
 /**
  * Saves the picture behind each placeholder of `ns`: from the copy in
- * `files` at its place, else the clipboard or a recent screenshot. `files`
- * are copies the work made; what no kept picture takes goes when the work ends.
+ * `files` at its place, else wherever `pickSource` finds one. `files` are
+ * copies the work made; what no kept picture takes goes when the work ends.
  */
 async function captureDraft($: $, options: PluginOptions, work: Work, ns: number[], via: string, files: string[]) {
   if (!isLive(work)) return
-  const h = await folder($, work)
+  // The session folder is made even when every placeholder is skipped.
+  await folder($, work)
   for (const [i, n] of ns.entries()) {
     // Claimed before any wait, so a second capture of this number stops here.
     if (inFlight.has(n)) continue
@@ -130,50 +131,12 @@ async function captureDraft($: $, options: PluginOptions, work: Work, ns: number
     try {
       const id = `draft-${n}-${await uniqueStamp($)}`
       if (hasDraft(await pictures($), n)) continue
-      let file = files[i]
-      let source: PeekSource = 'file'
-      if (!file) {
-        source = 'clipboard'
-        const out = await claim($, work, `${id}.png`)
-        const grab = await grabClipboard($, h, out)
-        const isStale = grab.change !== undefined && grab.change === lastChange
-        void probe($, 'clipboard', { n, via, isStale, ...grab, file: grab.file !== undefined })
-        if (grab.change !== undefined) lastChange = grab.change
-        if (!isStale && grab.file && isImageFile(grab.file)) {
-          const [copy] = await copyDropped($, work, [grab.file])
-          file = copy
-          source = 'file'
-        } else if (!isStale && grab.isSaved) {
-          file = out
-        } else {
-          // No new image on the clipboard: either a file was dropped (the
-          // engine turned its path into the placeholder unseen), likely a
-          // screenshot saved in the last two minutes, or the same clipboard
-          // image was pasted again. A guess either way: the sent bytes replace it.
-          const { path: shot, isDenied } = await recentScreenshot($, h, 120_000, usedShots)
-          void probe($, 'screenshot', { n, isFound: shot !== undefined, isDenied })
-          if (shot) {
-            usedShots.add(shot)
-            const [copy] = await copyDropped($, work, [shot])
-            file = copy
-            source = 'file'
-          } else if (grab.isSaved) {
-            file = out
-          } else if (grab.file && isImageFile(grab.file)) {
-            const [copy] = await copyDropped($, work, [grab.file])
-            file = copy
-            source = 'file'
-          } else if (isDenied && !isDeniedTold) {
-            isDeniedTold = true
-            $.ui.toast('image-peek: macOS hides dropped screenshots until sent. Paste with Ctrl+V, or give your terminal Full Disk Access.')
-          }
-        }
-      }
-      if (!file) {
+      const picked = await pickSource($, work, n, id, via, files[i])
+      if (!picked) {
         $.ui.toast(`Image #${n}: it will show once sent.`)
         continue
       }
-      const entry = isLive(work) ? await finish($, work, { id, n, source, file }) : undefined
+      const entry = isLive(work) ? await finish($, work, { id, n, ...picked }) : undefined
       if (!entry) continue
       // The draft may have been sent or edited while the picture was made.
       if (!isLive(work) || !(await $.prompt.read()).text.includes(`[Image #${n}]`)) continue
@@ -184,4 +147,54 @@ async function captureDraft($: $, options: PluginOptions, work: Work, ns: number
       inFlight.delete(n)
     }
   }
+}
+
+/**
+ * Where the picture behind placeholder `n` (draft `id`) comes from, in this
+ * order: `file`, the copy the paste named; the clipboard's image file or
+ * image, when copied since the last grab; a screenshot saved in the last two
+ * minutes that no other placeholder took; the clipboard's image or image
+ * file even if not new. Nothing when none has one.
+ */
+async function pickSource(
+  $: $,
+  work: Work,
+  n: number,
+  id: string,
+  via: string,
+  file: string | undefined,
+): Promise<{ file: string; source: PeekSource } | undefined> {
+  if (file) return { file, source: 'file' }
+  const h = await folder($, work)
+  const out = await claim($, work, `${id}.png`)
+  const grab = await grabClipboard($, h, out)
+  const isStale = grab.change !== undefined && grab.change === lastChange
+  void probe($, 'clipboard', { n, via, isStale, ...grab, file: grab.file !== undefined })
+  if (grab.change !== undefined) lastChange = grab.change
+  const imageFile = grab.file && isImageFile(grab.file) ? grab.file : undefined
+  if (!isStale && imageFile) return copied($, work, imageFile)
+  if (!isStale && grab.isSaved) return { file: out, source: 'clipboard' }
+  // No new image on the clipboard: either a file was dropped (the engine
+  // turned its path into the placeholder unseen), likely a screenshot saved
+  // in the last two minutes, or the same clipboard image was pasted again.
+  // A guess either way: the sent bytes replace it.
+  const { path: shot, isDenied } = await recentScreenshot($, h, 120_000, usedShots)
+  void probe($, 'screenshot', { n, isFound: shot !== undefined, isDenied })
+  if (shot) {
+    usedShots.add(shot)
+    return copied($, work, shot)
+  }
+  if (grab.isSaved) return { file: out, source: 'clipboard' }
+  if (imageFile) return copied($, work, imageFile)
+  if (isDenied && !isDeniedTold) {
+    isDeniedTold = true
+    $.ui.toast('image-peek: macOS hides dropped screenshots until sent. Paste with Ctrl+V, or give your terminal Full Disk Access.')
+  }
+  return undefined
+}
+
+/** `path` copied into the work's folder as a file-sourced picture, or nothing if the copy failed. */
+async function copied($: $, work: Work, path: string) {
+  const [copy] = await copyDropped($, work, [path])
+  return copy === undefined ? undefined : { file: copy, source: 'file' as const }
 }
