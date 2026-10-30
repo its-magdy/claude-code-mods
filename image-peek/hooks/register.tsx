@@ -2,7 +2,8 @@ import type { Register } from 'claude-code'
 
 import { changed, edited, submitted } from './capture'
 import { drawBand, drawRow } from './chips'
-import { ensureDir, host, hostFor, openExternally, removeDir, sweepStale } from './host'
+import { ended, host, started, sweep } from './folder'
+import { openExternally } from './host'
 import { latest } from './list'
 import { graphics } from './picture'
 import { PANE, drawPane, openPane, resetPane } from './pane'
@@ -12,7 +13,7 @@ import { keepSent, loadHistory } from './stored'
 
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
-    const started = await next(e)
+    const begun = await next(e)
     await $.command.register({
       name: 'peek',
       description: 'Show pasted images: /peek, /peek N, /peek open N, /peek clear, /peek debug',
@@ -21,34 +22,27 @@ export const register: Register = (on, options) => {
     later($, 'start', async work => {
       await graphics($, options)
       await loadHistory($, options, work)
-      await sweepStale($, await host($))
+      await sweep($)
     })
-    // Renews the folder's lease while the session lives, so no other
-    // session's sweep takes it for abandoned.
-    $.clock.every(60 * 60 * 1000, () => {
-      void host($).then(h => ensureDir($, h))
-    })
-    return started
+    started($)
+    return begun
   })
 
   // No session.start follows a /clear or an in-session /resume: the process
-  // goes on under a new id, so the old pictures go and a resumed
-  // conversation's are read back here. A real exit shares one short bound
-  // with every plugin; what it leaves, the next start sweeps.
+  // goes on under a new id, so the old folder goes (see folder.ts) and a
+  // resumed conversation's pictures are read back here.
   on('session.end', async ($, e, next) => {
-    const ended = await next(e)
+    const result = await next(e)
     await reset($, 'leave')
     await resetPane($, 'session')
-    const old = await hostFor($, e.sessionId)
-    if (e.reason === 'clear' || e.reason === 'resume') {
+    const removeOld = await ended($, e, next.budget)
+    if (removeOld) {
       later($, 'switch', async work => {
-        await removeDir($, old)
+        await removeOld()
         if (e.reason === 'resume') await loadHistory($, options, work)
       }, 300)
-    } else if (old.os !== 'windows' && next.budget.remainingMs > 300) {
-      await removeDir($, old)
     }
-    return ended
+    return result
   })
 
   // The draft's pictures: what a paste, a drop or an engine insert put in

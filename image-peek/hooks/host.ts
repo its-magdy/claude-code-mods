@@ -25,22 +25,9 @@ const IMAGE_FILE = /\.(png|jpe?g|gif|webp|heic|heif|tiff?|bmp)$/i
 export const isImageFile = (path: string) => IMAGE_FILE.test(path)
 
 let os: Os | undefined
-const cached = new Map<string, Host>()
 
-/**
- * The platform and this session's folder for pictures. Per session id, since
- * a /clear starts a new one. A folder only this user reads: macOS's TMPDIR is
- * per user; on Linux the runtime dir or ~/.cache, never the shared /tmp.
- */
-export async function host($: $): Promise<Host> {
-  return hostFor($, await $.session.id())
-}
-
-/** The same for a session named by id: an ending session's, after the process moved on. */
-export async function hostFor($: $, sessionId: string): Promise<Host> {
-  const session = sessionId.replace(/[^A-Za-z0-9_-]/g, '') || 'unnamed'
-  const known = cached.get(session)
-  if (known) return known
+/** The platform the session runs on, found once. */
+export async function platform($: $): Promise<Os> {
   if (!os) {
     if ((await $.env.get('OS')) === 'Windows_NT') {
       os = 'windows'
@@ -53,57 +40,10 @@ export async function hostFor($: $, sessionId: string): Promise<Host> {
           : 'linux'
     }
   }
-  let root: string
-  if (os === 'windows') {
-    root = `${(await $.env.get('LOCALAPPDATA')) ?? (await $.env.get('TEMP')) ?? 'C:\\Windows\\Temp'}\\claude-image-peek`
-  } else if (os === 'mac') {
-    root = `${((await $.env.get('TMPDIR')) ?? `${(await $.env.get('HOME')) ?? ''}/Library/Caches`).replace(/\/+$/, '')}/claude-image-peek`
-  } else {
-    const runtime = await $.env.get('XDG_RUNTIME_DIR')
-    root = runtime ? `${runtime}/claude-image-peek` : `${(await $.env.get('HOME')) ?? '/tmp'}/.cache/claude-image-peek`
-  }
-  const h: Host = { os, dir: `${root}${os === 'windows' ? '\\' : '/'}${session}` }
-  cached.set(session, h)
-  return h
+  return os
 }
 
-export const join = (h: Host, name: string) =>
-  `${h.dir}${h.os === 'windows' ? '\\' : '/'}${name}`
-
-const LEASE = '.lease'
-const made = new Set<string>()
-
-/**
- * Makes the session's folder (`$.fs.write` creates the directories),
- * readable by this user alone, and renews its lease: the file whose age tells
- * another session's sweep this folder is still in use.
- */
-export async function ensureDir($: $, h: Host) {
-  await $.fs.write(join(h, LEASE), String(await $.clock.now()))
-  if (made.has(h.dir)) return
-  if (h.os !== 'windows') {
-    await run($, ['chmod', '700', h.dir.slice(0, h.dir.lastIndexOf('/')), h.dir])
-  }
-  made.add(h.dir)
-}
-
-/** Deletes files of the session's folder whose names start with one of the ids, or are named in `exact`. */
-export async function removeFiles($: $, h: Host, ids: readonly string[], exact: readonly string[] = []) {
-  if (ids.length === 0 && exact.length === 0) return
-  const names = (await $.fs.list(h.dir).catch(() => [])).map(entry => entry.name)
-  const doomed = names.filter(
-    name => exact.includes(name) || ids.some(id => name.startsWith(`${id}.`) || name.startsWith(`${id}-`)),
-  )
-  if (doomed.length === 0) return
-  const paths = doomed.map(name => join(h, name))
-  if (h.os === 'windows') {
-    await powershell($, `Remove-Item -LiteralPath ${paths.map(quotePs).join(', ')} -Force -ErrorAction SilentlyContinue`)
-  } else {
-    await run($, ['rm', '-f', '--', ...paths])
-  }
-}
-
-async function run($: $, argv: string[], stdin?: string) {
+export async function run($: $, argv: string[], stdin?: string) {
   try {
     return await $.process.run(argv, { stdin, timeoutMs: 15_000 })
   } catch (error) {
@@ -111,11 +51,11 @@ async function run($: $, argv: string[], stdin?: string) {
   }
 }
 
-const quotePs = (s: string) => `'${s.replace(/'/g, "''")}'`
+export const quotePs = (s: string) => `'${s.replace(/'/g, "''")}'`
 
 const POWERSHELL = ['powershell.exe', '-NoProfile', '-NonInteractive', '-STA', '-Command']
 
-async function powershell($: $, script: string, stdin?: string) {
+export async function powershell($: $, script: string, stdin?: string) {
   return run($, [...POWERSHELL, script], stdin)
 }
 
@@ -213,9 +153,8 @@ export async function isPng($: $, path: string) {
 
 /** The file's first 32 bytes, read by a process: `$.fs.read` would copy the whole file (and refuses past 4 MiB). */
 async function readHead($: $, path: string) {
-  const h = await host($)
   const r =
-    h.os === 'windows'
+    (await platform($)) === 'windows'
       ? await powershell($, `$b = New-Object byte[] 32; $f = [IO.File]::OpenRead(${quotePs(path)}); $n = $f.Read($b, 0, 32); $f.Close(); [Convert]::ToBase64String($b, 0, $n)`)
       : await run($, ['sh', '-c', 'head -c 32 "$1" | base64', 'sh', path])
   return r.exitCode === 0 && r.stdout.trim() ? fromBase64(r.stdout.trim()) : undefined
@@ -351,38 +290,6 @@ export async function openExternally($: $, h: Host, path: string) {
   const r = await run($, argv)
   // explorer.exe exits 1 even when it opened the file.
   return r.exitCode === 0 || h.os === 'wsl'
-}
-
-/**
- * Deletes other sessions' folders left behind (an exit too quick to clean up,
- * a crash): those whose lease no live session has renewed for a day. A
- * running session renews its lease every hour, idle or not.
- */
-export async function sweepStale($: $, h: Host) {
-  const sep = h.os === 'windows' ? '\\' : '/'
-  const root = h.dir.slice(0, h.dir.lastIndexOf(sep))
-  const now = await $.clock.now()
-  const entries = await $.fs.list(root).catch(() => [])
-  for (const entry of entries) {
-    if (entry.kind !== 'dir' || !/^[A-Za-z0-9_-]+$/.test(entry.name)) continue
-    const dir = `${root}${sep}${entry.name}`
-    if (dir === h.dir) continue
-    const lease = await $.fs.stat(`${dir}${sep}${LEASE}`).catch(() => undefined)
-    const stat = lease ?? (await $.fs.stat(dir).catch(() => undefined))
-    if (stat && now - stat.mtimeMs > 24 * 60 * 60 * 1000) await removeDir($, { os: h.os, dir })
-  }
-}
-
-/** Deletes the session's folder of pictures. */
-export async function removeDir($: $, h: Host) {
-  // Only ever a session's own folder under ours: never the parent, never empty.
-  if (!/claude-image-peek[\\/][A-Za-z0-9_-]+$/.test(h.dir)) return
-  made.delete(h.dir)
-  if (h.os === 'windows') {
-    await powershell($, `Remove-Item -LiteralPath ${quotePs(h.dir)} -Recurse -Force -ErrorAction SilentlyContinue`)
-  } else {
-    await run($, ['rm', '-rf', h.dir])
-  }
 }
 
 /**
