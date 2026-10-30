@@ -7,8 +7,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, RenderElement, RenderInput } from 'claude-code'
 
 import type { PeekImage } from '../types'
-import { host } from './folder'
-import { openExternally } from './host'
+import { platform } from './host'
 import { drafts, sent } from './list'
 import { draw } from './picture'
 import { pictures } from './pictures'
@@ -67,7 +66,7 @@ export async function drawPane($: $, e: RenderInput<'Pane'>, options: PluginOpti
           <Text bold>Image {chosen.n}</Text>
           <Text dimColor>{chosen.source}</Text>
           <Button key="back" label="Back" hotkey="b" onPress={() => update($, selected, () => null)} />
-          <Button key="open" label="Open" hotkey="o" onPress={async () => void openExternally($, await host($), chosen.path)} />
+          <Button key="open" label="Open" hotkey="o" onPress={async () => void (await platform($)).openExternally(chosen.path)} />
           {closeButton}
           <Text dimColor>{keysHint}</Text>
         </Box>

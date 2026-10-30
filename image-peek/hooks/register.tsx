@@ -2,8 +2,8 @@ import type { Register } from 'claude-code'
 
 import { changed, edited, submitted } from './capture'
 import { drawBand, drawRow } from './chips'
-import { ended, host, started, sweep } from './folder'
-import { openExternally } from './host'
+import { ended, started, sweep } from './folder'
+import { platform } from './host'
 import { latest } from './list'
 import { graphics } from './picture'
 import { PANE, drawPane, openPane, resetPane } from './pane'
@@ -117,7 +117,7 @@ export const register: Register = (on, options) => {
     const img = Number.isInteger(n) ? latest(list, n) : undefined
     if (!img) return { text: `No Image #${isOpen ? second ?? '?' : first} yet. Usage: /peek [N | open N | clear | debug]` }
     if (isOpen || (await graphics($, options)) === 'off') {
-      const isOpened = await openExternally($, await host($), img.path)
+      const isOpened = await (await platform($)).openExternally(img.path)
       return { text: isOpened ? `Opened Image #${n} in the system viewer.` : `Could not open ${img.path}.` }
     }
     await openPane($, img)
