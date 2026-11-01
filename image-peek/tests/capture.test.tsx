@@ -3,22 +3,13 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
 import type { PeekImage } from '../types'
-import { toBase64 } from '../hooks/base64'
+import { machine } from './machine'
+import type { Clipboard } from './machine'
 
 // A macOS session with no terminal of its own: TMPDIR and HOME unset put the
 // session's folder here.
-const DIR = '/Library/Caches/claude-image-peek/test-session'
+const DIR = '/Library/Caches/claude-image-peek/sess-1'
 const name = (path: string) => path.slice(path.lastIndexOf('/') + 1)
-
-// A PNG's first 24 bytes: the signature and the IHDR chunk's width and height.
-const pngHead = (width: number, height: number) => {
-  const head = new Uint8Array(24)
-  head.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52])
-  const view = new DataView(head.buffer)
-  view.setUint32(16, width)
-  view.setUint32(20, height)
-  return toBase64(head)
-}
 
 /**
  * Raises `prompt.change` as the engine does when it puts a placeholder in the
@@ -32,18 +23,10 @@ const promptChange = ($: Parameters<TestBody>[0], e: PromptChangeInput) =>
 const promptEdit = ($: Parameters<TestBody>[0], e: PromptEditInput) =>
   ($.prompt as unknown as { edit: (e: PromptEditInput) => Promise<unknown> }).edit(e)
 
-const ran = (exitCode: number, stdout = '', stderr = '') => ({
-  value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false },
-})
-
-type Clipboard = { change: number; types: string[]; isImage: boolean }
-
 /**
- * The world beneath the mod for a capture: stored values in memory, a
- * session folder the processes write to and `rm` empties, the clipboard as
- * `osascript` reads it, the prompt box, and the screenshots on the Desktop
- * (HOME unset: `/Desktop`), saved when the clock started; `disk` holds other
- * files a paste may name.
+ * The world beneath the mod for a capture: stored values in memory, the
+ * prompt box, and the machine with the clipboard, the screenshots on the
+ * Desktop and the other files a paste may name.
  */
 function world(
   on: On,
@@ -57,7 +40,6 @@ function world(
 ) {
   const clock = mock.clock(on)
   const stored = new Map<string, unknown>()
-  const files = new Set<string>()
   const toasts: string[] = []
   let prompt = options.prompt
   let version = 0
@@ -66,8 +48,6 @@ function world(
     stored.set(e.key, e.value)
     return { value: { isSet: true, version: ++version } }
   })
-  on('env.get', () => ({ value: undefined }))
-  on('session.id', () => ({ value: 'test-session' }))
   on('prompt.read', () => ({ value: { text: prompt, cursor: prompt.length } }))
   on('ui.toast', (_, e) => {
     toasts.push(e.text)
@@ -79,59 +59,12 @@ function world(
     const text = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
     return { text, cursor: e.start + e.inputText.length }
   })
-  on('fs.write', (_, e) => {
-    if (e.path.startsWith(`${DIR}/`)) files.add(name(e.path))
-    return { value: undefined }
-  })
-  const entry = (file: string) => ({ name: file, kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })
-  on('fs.list', (_, e) => ({
-    value: e.path === DIR ? [...files].map(entry) : e.path === '/Desktop' ? (options.desktop ?? []).map(entry) : [],
-  }))
-  on('process.run', async (_, e) => {
-    const argv = e.argv
-    await options.onRun?.(argv)
-    const ok = (stdout = '') => ran(0, stdout)
-    switch (argv[0]) {
-      case 'uname':
-        return ok('Darwin 25.0.0')
-      case 'osascript': {
-        const { clipboard } = options
-        if (clipboard.isImage) files.add(name(argv.at(-1)!))
-        return ok(JSON.stringify({ change: clipboard.change, types: clipboard.types, isSaved: clipboard.isImage || undefined }))
-      }
-      // Each reads a file of the folder, and fails as the real one does when it is not there.
-      case 'sips': {
-        const from = argv[argv.indexOf('--out') - 1]!
-        if (!from.startsWith(`${DIR}/`) || !files.has(name(from))) return ran(1, '', 'no such file')
-        files.add(name(argv.at(-1)!))
-        return ok()
-      }
-      case 'sh': {
-        const path = argv.at(-1)!
-        return path.startsWith(`${DIR}/`) && files.has(name(path)) ? ok(pngHead(800, 400)) : ran(1, '', 'no such file')
-      }
-      case 'cp': {
-        const [from, to] = [argv[1]!, argv[2]!]
-        const isThere = from.startsWith(`${DIR}/`)
-          ? files.has(name(from))
-          : (options.desktop ?? []).some(file => from === `/Desktop/${file}`) || (options.disk ?? []).includes(from)
-        if (!isThere || !to.startsWith(`${DIR}/`)) return ran(1, '', 'no such file')
-        files.add(name(to))
-        return ok()
-      }
-      case 'rm':
-        for (const path of argv.slice(argv.indexOf('--') + 1)) files.delete(name(path))
-        return ok()
-      case 'defaults':
-        return ran(1, '', 'not set')
-      default:
-        return ok()
-    }
-  })
+  const { clipboard, desktop, disk, onRun } = options
+  const { left } = machine(on, { env: {}, clipboard, desktop, disk, onRun })
   const list = () => ((stored.get('images') as { value?: PeekImage[] } | undefined)?.value ?? []) as PeekImage[]
   return {
     clock,
-    files,
+    files: () => left(DIR),
     toasts,
     list,
     setPrompt: (text: string) => {
@@ -150,7 +83,7 @@ test('a placeholder the engine put in is captured from the clipboard and shows i
   const [img] = w.list()
   expect(w.list()).toHaveLength(1)
   expect([img?.n, img?.source, img?.width, img?.height]).toEqual([1, 'clipboard', 800, 400])
-  expect([...w.files].sort()).toEqual(['.lease', `${img!.id}.png`, `${img!.id}.small.png`, `${img!.id}.thumb.png`])
+  expect(w.files()).toEqual(['.lease', `${img!.id}.png`, `${img!.id}.small.png`, `${img!.id}.thumb.png`])
 
   const band = await $.ui.mount({
     plugin: 'image-peek',
@@ -170,7 +103,7 @@ test('with no image on the clipboard and no recent screenshot, the placeholder w
 
   expect(w.list()).toEqual([])
   expect(w.toasts).toContain('Image #1: it will show once sent.')
-  expect([...w.files]).toEqual(['.lease'])
+  expect(w.files()).toEqual(['.lease'])
 })
 
 test('a picture whose placeholder left the draft while it was made is not kept, and its files go', async ($, on) => {
@@ -184,7 +117,7 @@ test('a picture whose placeholder left the draft while it was made is not kept, 
   await w.clock.settle()
 
   expect(w.list()).toEqual([])
-  expect([...w.files]).toEqual(['.lease'])
+  expect(w.files()).toEqual(['.lease'])
 })
 
 // The clear comes while the thumbnails are made (`sips`), or after, while the
@@ -210,7 +143,7 @@ for (const [step, when] of [
 
     expect(isCleared).toBe(true)
     expect(w.list()).toEqual([])
-    expect([...w.files]).toEqual(['.lease'])
+    expect(w.files()).toEqual(['.lease'])
   })
 }
 
@@ -232,7 +165,7 @@ test('the clipboard unchanged since the last paste: a screenshot saved just now 
   expect(second?.path).toMatch(/\/drop-[0-9-]+\.png$/)
   // The clipboard's stale copy for #2 went; #1's files and #2's copy stay.
   const first = w.list().find(img => img.n === 1)!
-  expect([...w.files].filter(file => !file.startsWith(first.id)).sort()).toEqual([
+  expect(w.files().filter(file => !file.startsWith(first.id)).sort()).toEqual([
     '.lease',
     name(second!.path),
     `${second!.id}.small.png`,
@@ -284,5 +217,5 @@ test('a placeholder deleted from the draft takes its picture and files with it',
   await promptEdit($, { origin: { kind: 'composer' }, text: '[Image #1]', cursor: 10, start: 0, end: 10, inputText: '' })
   await w.clock.settle()
   expect(w.list()).toEqual([])
-  expect([...w.files]).toEqual(['.lease'])
+  expect(w.files()).toEqual(['.lease'])
 })

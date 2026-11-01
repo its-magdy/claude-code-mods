@@ -7,6 +7,7 @@ import { Lru } from '../hooks/cache'
 import { imagePaths } from '../hooks/host'
 import { addDraft, drafts, forRow, sent, storePrompt, tagDrafts, unread } from '../hooks/list'
 import { bmpToCells, readBmp } from '../hooks/raster'
+import { machine } from './machine'
 
 const SHOT: PeekImage = {
   id: 'msg-1-1',
@@ -243,21 +244,12 @@ test('a resumed row matches past the source path the engine stores beside a drop
 
 /**
  * The command a stored prompt's bytes are decoded with, on a platform its
- * environment names: every process the mod runs is recorded and succeeds.
+ * environment names.
  */
 async function decodeCommand($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], env: Record<string, string>) {
   const clock = mock.clock(on)
-  const runs: { argv: readonly string[]; stdin?: string }[] = []
-  on('session.id', () => ({ value: 'sess-1' }))
-  on('env.get', (_, e) => ({ value: env[e.name] }))
   on('ui.log', () => ({ value: undefined }))
-  on('fs.write', () => ({ value: undefined }))
-  on('fs.list', () => ({ value: [] }))
-  on('process.run', (_, e) => {
-    runs.push({ argv: e.argv, stdin: e.init?.stdin })
-    const stdout = e.argv[0] === 'uname' ? 'Darwin 25.0.0' : ''
-    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-  })
+  const { runs } = machine(on, { env })
   await storeJpeg($)
   await clock.settle()
   return runs.find(r => r.stdin === 'aGVsbG8=')
@@ -419,18 +411,9 @@ const tinyBmp = (isFlipped = false) => {
 
 test('blocks: a sent picture draws a placeholder, then its cells once made off the drawing', { options: { graphics: 'blocks' } }, async ($, on) => {
   const clock = mock.clock(on)
-  const runs: string[] = []
   on('state.get', seed({ images: [SHOT], isDebug: false }))
-  on('env.get', noEnv)
-  on('process.run', (_, e) => {
-    runs.push(e.argv[0]!)
-    return { value: { exitCode: 0, stdout: e.argv[0] === 'uname' ? 'Darwin 25.0.0' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-  })
+  const { runs } = machine(on, { env: {}, disk: [SHOT.small] })
   on('fs.read', () => ({ value: { base64: tinyBmp() } }))
-  on('fs.list', () => ({ value: [] }))
-  // The cells' work makes the session folder, renewing its lease.
-  on('fs.write', () => ({ value: undefined }))
-  on('session.id', () => ({ value: 'test-session' }))
   const logs: string[] = []
   on('ui.log', (_, e) => {
     logs.push(JSON.stringify(e))
@@ -458,7 +441,7 @@ test('blocks: a sent picture draws a placeholder, then its cells once made off t
   // 800 x 400 in the 28 x 8 inline box: 28 columns, 7 rows of cells.
   expect(logs).toEqual([])
   expect([raster?.props.columns, raster?.props.rows]).toEqual([28, 7])
-  expect(runs).toContain('sips')
+  expect(runs.map(({ argv }) => argv[0])).toContain('sips')
   await row.unmount()
 })
 
@@ -472,15 +455,9 @@ test('blocks: a picture cleared and then restored at the same path draws its cel
     stored.set(e.key, e.value)
     return { value: { isSet: true, version: ++version } }
   })
-  on('env.get', noEnv)
-  on('session.id', () => ({ value: 'test-session' }))
-  on('process.run', (_, e) => ({
-    value: { exitCode: 0, stdout: e.argv[0] === 'uname' ? 'Darwin 25.0.0' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
-  }))
+  machine(on, { env: {}, disk: [SHOT.small] })
   let bmp = tinyBmp()
   on('fs.read', () => ({ value: { base64: bmp } }))
-  on('fs.list', () => ({ value: [] }))
-  on('fs.write', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
@@ -523,21 +500,19 @@ test('blocks: a /peek clear while cells are made keeps none; the picture restore
     stored.set(e.key, e.value)
     return { value: { isSet: true, version: ++version } }
   })
-  on('env.get', noEnv)
-  on('session.id', () => ({ value: 'test-session' }))
   let isCleared = false
-  on('process.run', async (_, e) => {
+  machine(on, {
+    env: {},
+    disk: [SHOT.small],
     // The person clears the list while the first cells' BMP is made.
-    if (e.argv[0] === 'sips' && !isCleared) {
+    onRun: async argv => {
+      if (argv[0] !== 'sips' || isCleared) return
       isCleared = true
       await $.command.run({ command: 'peek', args: 'clear', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
-    }
-    return { value: { exitCode: 0, stdout: e.argv[0] === 'uname' ? 'Darwin 25.0.0' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    },
   })
   let bmp = tinyBmp()
   on('fs.read', () => ({ value: { base64: bmp } }))
-  on('fs.list', () => ({ value: [] }))
-  on('fs.write', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
@@ -571,50 +546,11 @@ test('blocks: a /peek clear while cells are made keeps none; the picture restore
 
 const STORE_DIR = '/t/claude-image-peek/sess-1'
 
-/**
- * A macOS session folder in memory: the files the mod's commands write and
- * delete, so a test reads what is left behind. `isConverting` says whether
- * sips succeeds.
- */
+/** A macOS session folder's files, left as the mod's commands write and delete them. */
 function fakeMac(on: Parameters<TestBody>[1], isConverting: boolean, onRun?: (argv: readonly string[]) => unknown) {
-  const files = new Set<string>()
-  const ok = (stdout = '') => ({ exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false })
-  const failed = { ...ok(), exitCode: 1 }
-  on('session.id', () => ({ value: 'sess-1' }))
-  on('env.get', (_, e) => ({ value: e.name === 'TMPDIR' ? '/t/' : undefined }))
   on('ui.log', () => ({ value: undefined }))
-  on('fs.write', (_, e) => {
-    files.add(e.path)
-    return { value: undefined }
-  })
-  on('fs.list', (_, e) => ({
-    value: [...files]
-      .filter(path => path.slice(0, path.lastIndexOf('/')) === e.path)
-      .map(path => ({ name: path.slice(path.lastIndexOf('/') + 1), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })),
-  }))
-  on('process.run', async (_, e) => {
-    await onRun?.(e.argv)
-    return { value: run(e.argv) }
-  })
-  const run = (argv: readonly string[]) => {
-    if (argv[0] === 'uname') return ok('Darwin 25.0.0')
-    if (argv[0] === 'chmod') return ok()
-    if (argv[0] === 'rm') {
-      for (const path of argv.slice(3)) files.delete(path)
-      return ok()
-    }
-    if (argv[0] === 'sips') {
-      if (!isConverting) return failed
-      files.add(argv.at(-1)!)
-      return ok()
-    }
-    if (argv[0] === 'sh' && argv[2]?.startsWith('base64 --decode')) {
-      files.add(argv.at(-1)!)
-      return ok()
-    }
-    return failed // the header read: an unknown size
-  }
-  return () => [...files].map(path => path.slice(STORE_DIR.length + 1)).sort()
+  const { left } = machine(on, { isConverting, onRun })
+  return () => left(STORE_DIR)
 }
 
 const WIN_STORE_DIR = 'C:\\L\\claude-image-peek\\sess-1'
