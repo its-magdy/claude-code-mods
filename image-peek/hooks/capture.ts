@@ -10,7 +10,7 @@ import type { EngineInterface, PluginOptions, PromptBox, PromptChangeInput, Prom
 
 import type { PeekSource } from '../types'
 import { imagePaths, isImageFile, platform } from './host'
-import { addDraft, dropDrafts, hasDraft, placeholders, tagDrafts } from './list'
+import { addDraft, dropDrafts, hasDraft, placeholders, submitDrafts } from './list'
 import { offerPane } from './pane'
 import { warm } from './picture'
 import { claim, finish, folder, keep, later, perGeneration, pictures, run } from './pictures'
@@ -92,12 +92,12 @@ export async function changed($: $, options: PluginOptions, e: PromptChangeInput
   capture($, options, missing, `change:${e.origin.kind}`, paths)
 }
 
-/** A prompt sent with pictures: the draft's are tagged with its text, so its row finds them before the stored bytes arrive. */
+/** A prompt sent with pictures: the draft's are submitted, tagged with its text, so its row finds them before the stored bytes arrive. */
 export async function submitted($: $, e: PromptSubmitInput) {
   const attached = e.attachments?.filter(a => a.type === 'image') ?? []
   if (attached.length === 0 && !e.text.includes('[Image #')) return
   void probe($, 'prompt.submit', { chars: e.text.length, attachments: attached.map(a => a.mediaType) })
-  await run($, work => keep($, work, list => tagDrafts(list, e.text)))
+  await run($, work => keep($, work, list => submitDrafts(list, e.text)))
 }
 
 /**
@@ -145,7 +145,7 @@ async function captureDraft($: $, options: PluginOptions, work: Work, ns: number
         $.ui.toast(`Image #${n}: it will show once sent.`)
         continue
       }
-      const entry = await finish($, work, { id, n, ...picked })
+      const entry = await finish($, work, { id, n, stage: 'draft', ...picked })
       if (!entry) continue
       // The draft may have been sent or edited while the picture was made.
       if (!(await $.prompt.read()).text.includes(`[Image #${n}]`)) continue

@@ -1,15 +1,16 @@
-// The image list: which pictures the session holds and where each belongs.
-// A picture starts as a draft (in the prompt), is tagged with the prompt's
-// text when it is submitted, and is replaced by the stored bytes once the
-// prompt's row is written; a resumed session's are read back as history.
-// Every hook asks here, so draft, sent and "this row's" mean one thing.
+// The image list: which pictures the session holds and the stage each is at.
+// A picture starts as a draft (in the prompt), is submitted with the prompt's
+// text, and is replaced by the stored bytes once the prompt's row is written;
+// a resumed session's are read back as history. Each step below sets the
+// stage it leads to, and every hook asks here, so draft, sent (any stage but
+// draft) and "this row's" mean one thing.
 
 import type { ApiContentBlock } from 'claude-code'
 
 import type { PeekImage } from '../types'
 
 export const MAX_KEPT = 40
-/** Sent pictures the band and the pane hold at most. */
+/** Sent pictures (past the draft) the band and the pane hold at most. */
 const SHOWN_SENT = 12
 const PLACEHOLDER = /\[Image #(\d+)\]/g
 
@@ -46,14 +47,12 @@ const sameRow = (requestId: string, messageId: string | undefined) =>
   messageId !== undefined &&
   (requestId === messageId || (/-0{12}$/.test(requestId) && requestId.slice(0, 24) === messageId.slice(0, 24)))
 
-const isDraft = (img: PeekImage) => img.messageId === undefined && img.promptText === undefined
-/** Tagged at submit, its stored bytes not in yet. */
-const isSubmitted = (img: PeekImage) => img.messageId === undefined && img.source !== 'history' && img.promptText !== undefined
+const isDraft = (img: PeekImage) => img.stage === 'draft'
 
 /** The draft's pictures, by number. */
 export const drafts = (list: readonly PeekImage[]) => list.filter(isDraft).sort((a, b) => a.n - b.n)
 
-/** The newest pictures that left the prompt: submitted, sent or read back. */
+/** The newest sent pictures (every stage past the draft): submitted, stored or read back. */
 export const sent = (list: readonly PeekImage[]) =>
   list
     .filter(img => !isDraft(img))
@@ -80,31 +79,37 @@ export const capped = (list: PeekImage[]) => list.sort((a, b) => a.addedAt - b.a
 /** A draft's picture, in place of an earlier one of its number. */
 export const addDraft = (list: readonly PeekImage[], entry: PeekImage) => [
   ...list.filter(img => !(isDraft(img) && img.n === entry.n)),
-  entry,
+  { ...entry, stage: 'draft' as const },
 ]
 
 /** Drops the drafts whose number `isGone` accepts. */
 export const dropDrafts = (list: readonly PeekImage[], isGone: (n: number) => boolean) =>
   list.filter(img => !(isDraft(img) && isGone(img.n)))
 
-/** Tags the drafts a submitted prompt names (all of them when it names none) with its text. */
-export function tagDrafts(list: readonly PeekImage[], text: string) {
+/** Submits the drafts a prompt names (all of them when it names none), tagged with its text. */
+export function submitDrafts(list: readonly PeekImage[], text: string): PeekImage[] {
   const named = placeholders(text)
-  return list.map(img => (isDraft(img) && (named.length === 0 || named.includes(img.n)) ? { ...img, promptText: text } : img))
+  return list.map(img =>
+    isDraft(img) && (named.length === 0 || named.includes(img.n)) ? { ...img, stage: 'submitted', promptText: text } : img,
+  )
 }
 
 /**
- * Puts a stored prompt's pictures in place of what the draft held for it
- * (tagged with its text at submit) and any earlier copy of its row; a draft
- * of the next prompt stays.
+ * Puts a stored row's pictures, at `stage`, in place of what was submitted
+ * with its text and any earlier copy of its row; a draft of the next prompt
+ * stays. `stored` for a prompt sent this session, `history` for one read back.
  */
-export function storePrompt(list: readonly PeekImage[], kept: readonly PeekImage[], row: { messageId?: string; text: string }) {
+export function storePrompt(
+  list: readonly PeekImage[],
+  kept: readonly PeekImage[],
+  row: { messageId?: string; text: string; stage: 'stored' | 'history' },
+): PeekImage[] {
   return [
     ...list.filter(img => {
       if (row.messageId !== undefined && img.messageId === row.messageId) return false
-      return !(isSubmitted(img) && sameText(img.promptText!, row.text))
+      return !(img.stage === 'submitted' && sameText(img.promptText!, row.text))
     }),
-    ...kept,
+    ...kept.map(img => ({ ...img, stage: row.stage })),
   ]
 }
 
@@ -121,7 +126,7 @@ export function unread<R extends { idPrefix: string; content: readonly ApiConten
     seen.set(text, occurrence + 1)
     if (list.some(img => img.id.startsWith(`${row.idPrefix}-`))) return false
     const sentRows = new Set(
-      list.filter(img => img.source === 'sent' && img.promptText !== undefined && sameText(img.promptText, text)).map(img => img.messageId),
+      list.filter(img => img.stage === 'stored' && img.promptText !== undefined && sameText(img.promptText, text)).map(img => img.messageId),
     )
     return sentRows.size <= occurrence
   })

@@ -23,6 +23,9 @@ const selected = atom({ plugin: 'image-peek', key: 'selected' } as const, null)
 // Module state: rebuilt after a reload, and nothing drawn depends on it alone.
 let isOffered = false
 
+/** A picture's label in the pane: where a draft's came from, else what its stored bytes are. */
+const label = (img: PeekImage) => (img.stage === 'stored' ? 'sent' : img.stage === 'history' ? 'history' : img.source)
+
 /** Opens the pane the person asked for, on `img` big or on the list: it takes the keys, and Escape closes it. */
 export async function openPane($: $, img?: PeekImage) {
   await update($, selected, () => img?.id ?? null)
@@ -45,7 +48,7 @@ export async function resetPane($: $, what: 'list' | 'session') {
   await update($, selected, () => null)
 }
 
-/** The pane: the picture chosen, big, or the draft's and the sent ones listed. */
+/** The pane: the picture chosen, big, or the draft's and the sent ones (every stage past the draft) listed. */
 export async function drawPane($: $, e: RenderInput<'Pane'>, options: PluginOptions): Promise<RenderElement> {
   const { Box, Button, Text } = $.ui.resolve(e)
   const list = await pictures($)
@@ -64,7 +67,7 @@ export async function drawPane($: $, e: RenderInput<'Pane'>, options: PluginOpti
       <Box flexDirection="column">
         <Box flexDirection="row" gap={2}>
           <Text bold>Image {chosen.n}</Text>
-          <Text dimColor>{chosen.source}</Text>
+          <Text dimColor>{label(chosen)}</Text>
           <Button key="back" label="Back" hotkey="b" onPress={() => update($, selected, () => null)} />
           <Button key="open" label="Open" hotkey="o" onPress={async () => void (await platform($)).openExternally(chosen.path)} />
           {closeButton}
@@ -94,7 +97,7 @@ export async function drawPane($: $, e: RenderInput<'Pane'>, options: PluginOpti
       ...items.map((img, i) => (
         <Box key={`row-${img.id}`} flexDirection="column" marginBottom={1}>
           <Button key={`sel-${img.id}`} plain onPress={() => openPane($, img)}>
-            <Text color="cyan">▣ Image {img.n}</Text> <Text dimColor>{img.source}</Text>
+            <Text color="cyan">▣ Image {img.n}</Text> <Text dimColor>{label(img)}</Text>
           </Button>
           {pics[i]}
         </Box>
