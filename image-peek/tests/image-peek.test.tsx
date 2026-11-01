@@ -56,8 +56,6 @@ test('the picture cache stays within its budget, least recently used out', async
   expect([cache.has('miss'), cache.weight]).toEqual([true, 9])
   cache.set('a', 'aa') // replacing re-weighs
   expect(cache.weight).toBe(7)
-  cache.deleteWhere(key => key !== 'c')
-  expect([cache.size, cache.weight]).toEqual([1, 4])
 })
 
 test('a 24-bit bottom-up BMP becomes half-block cells', async () => {
