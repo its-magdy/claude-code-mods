@@ -1,11 +1,20 @@
-/** Where a picture came from. */
+/** Where a picture's bytes came from. */
 export type PeekSource =
   /** Grabbed from the clipboard as the placeholder appeared in the draft. */
   | 'clipboard'
   /** Copied from a file path that was dropped or pasted into the draft. */
   | 'file'
-  /** The bytes the engine stored with a sent prompt: what the model saw. */
-  | 'sent'
+  /** Written from the bytes a prompt's transcript row carried: what the model saw. */
+  | 'transcript'
+
+/** Where a picture is in its life; every stage but `draft` is sent. */
+export type PeekStage =
+  /** In the prompt being typed. */
+  | 'draft'
+  /** Its prompt was submitted (tagged with the prompt's text); the stored bytes are not in yet. */
+  | 'submitted'
+  /** The bytes stored with a prompt sent this session. */
+  | 'stored'
   /** Read back from the transcript of a resumed session. */
   | 'history'
 
@@ -16,17 +25,18 @@ export type PeekImage = {
   n: number
   /** The picture as a PNG on disk. */
   path: string
-  /** A PNG of 800 px at most, for the pane; `path` when none was made. */
+  /** A PNG of 800 px at most, drawn as an image in the hover card and the pane; `path` when none was made. */
   thumb: string
-  /** A PNG of 400 px at most, for hover cards and inline thumbnails. */
+  /** A PNG of 400 px at most, drawn as an inline thumbnail and made into every view's cells; `thumb` when none was made. */
   small: string
   /** The thumbnail's pixel size, 0 when unknown. */
   width: number
   height: number
   source: PeekSource
-  /** The transcript row of the prompt that carried it; absent in the draft. */
+  stage: PeekStage
+  /** The transcript row of the prompt that carried it: known once `stored`. */
   messageId?: string
-  /** That prompt's text, to find its row when the row id is not known. */
+  /** That prompt's text, to find its row when the row id is not known: absent in the draft. */
   promptText?: string
   addedAt: number
 }

@@ -82,7 +82,7 @@ test('a placeholder the engine put in is captured from the clipboard and shows i
 
   const [img] = w.list()
   expect(w.list()).toHaveLength(1)
-  expect([img?.n, img?.source, img?.width, img?.height]).toEqual([1, 'clipboard', 800, 400])
+  expect([img?.n, img?.source, img?.stage, img?.width, img?.height]).toEqual([1, 'clipboard', 'draft', 800, 400])
   expect(w.files()).toEqual(['.lease', `${img!.id}.png`, `${img!.id}.small.png`, `${img!.id}.thumb.png`])
 
   const band = await $.ui.mount({

@@ -22,7 +22,9 @@ type $ = EngineInterface
 
 // Change the tag when PeekImage's fields change: values an earlier version
 // stored outlive a reload, and are read as absent under another tag.
-const images = atom({ plugin: 'image-peek', key: 'images' } as const, [], { shape: 'images-2' })
+/** The shape tag the image list is stored under. */
+export const IMAGES_SHAPE = 'images-3'
+const images = atom({ plugin: 'image-peek', key: 'images' } as const, [], { shape: IMAGES_SHAPE })
 
 let generation = 0
 
@@ -152,7 +154,7 @@ export async function reset($: $, files: 'delete' | 'leave') {
 export async function finish(
   $: $,
   work: Work,
-  base: Pick<PeekImage, 'id' | 'n' | 'source' | 'messageId' | 'promptText'> & { file: string },
+  base: Pick<PeekImage, 'id' | 'n' | 'source' | 'stage' | 'messageId' | 'promptText'> & { file: string },
 ): Promise<PeekImage | undefined> {
   stopIfStale(work)
   const p = await platform($)

@@ -6,7 +6,7 @@
 
 import type { ApiContentBlock, EngineInterface, PluginOptions } from 'claude-code'
 
-import type { PeekImage, PeekSource } from '../types'
+import type { PeekImage } from '../types'
 import { platform } from './host'
 import { MAX_KEPT, placeholders, storePrompt, textOf, unread } from './list'
 import { warm } from './picture'
@@ -22,7 +22,7 @@ async function keepPrompt(
   options: PluginOptions,
   work: Work,
   content: readonly ApiContentBlock[],
-  where: { messageId?: string; idPrefix: string; source: PeekSource },
+  where: { messageId?: string; idPrefix: string; stage: 'stored' | 'history' },
 ) {
   const blocks = content.filter(b => b.type === 'image')
   if (blocks.length === 0) return
@@ -42,13 +42,13 @@ async function keepPrompt(
     const id = `${where.idPrefix}-${n}`
     const raw = await claim($, work, `${id}.${ext}`)
     const entry = (await p.writeBase64(source.data, raw))
-      ? await finish($, work, { id, n, source: where.source, file: raw, messageId: where.messageId, promptText: text })
+      ? await finish($, work, { id, n, source: 'transcript', stage: where.stage, file: raw, messageId: where.messageId, promptText: text })
       : undefined
     if (entry) kept.push(entry)
   }
-  void probe($, where.source, { messageId: where.messageId, named, kept: kept.length, chars: text.length })
+  void probe($, where.stage, { messageId: where.messageId, named, kept: kept.length, chars: text.length })
   if (kept.length === 0) return
-  await keep($, work, list => storePrompt(list, kept, { messageId: where.messageId, text }))
+  await keep($, work, list => storePrompt(list, kept, { messageId: where.messageId, text, stage: where.stage }))
   // The cap may have left out the oldest of these; only listed pictures get cells.
   const listed = await pictures($)
   for (const img of kept) if (listed.some(entry => entry.id === img.id)) await warm($, options, img)
@@ -63,11 +63,11 @@ export async function loadHistory($: $, options: PluginOptions, work: Work) {
     .filter(row => row.isPrompt && row.content.some(b => b.type === 'image') && !row.content.some(b => b.type === 'tool_result'))
     .slice(-MAX_KEPT)
   for (const row of unread(await pictures($), rows)) {
-    await keepPrompt($, options, work, row.content, { idPrefix: row.idPrefix, source: 'history' })
+    await keepPrompt($, options, work, row.content, { idPrefix: row.idPrefix, stage: 'history' })
   }
 }
 
 /** Keeps the pictures of a prompt just sent, from its stored row. */
 export function keepSent($: $, options: PluginOptions, work: Work, content: readonly ApiContentBlock[], messageId: string) {
-  return keepPrompt($, options, work, content, { messageId, idPrefix: messageId, source: 'sent' })
+  return keepPrompt($, options, work, content, { messageId, idPrefix: messageId, stage: 'stored' })
 }

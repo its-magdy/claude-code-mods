@@ -5,7 +5,8 @@ import type { PeekImage } from '../types'
 import { toBase64 } from '../hooks/base64'
 import { Lru } from '../hooks/cache'
 import { imagePaths } from '../hooks/host'
-import { addDraft, drafts, forRow, sent, storePrompt, tagDrafts, unread } from '../hooks/list'
+import { addDraft, drafts, forRow, sent, storePrompt, submitDrafts, unread } from '../hooks/list'
+import { IMAGES_SHAPE } from '../hooks/pictures'
 import { bmpToCells, readBmp } from '../hooks/raster'
 import { machine } from './machine'
 
@@ -17,17 +18,26 @@ const SHOT: PeekImage = {
   small: '/tmp/claude-image-peek/s/msg-1-1.small.png',
   width: 800,
   height: 400,
-  source: 'sent',
+  source: 'transcript',
+  stage: 'stored',
   messageId: 'msg-1',
   promptText: 'fix the margin in [Image #1]',
   addedAt: 1,
 }
 
+/** The image list as the session stores it: with its shape tag, as the atom's `{ shape }` writes it. */
+const storedList = (images: PeekImage[]) => ({ shape: IMAGES_SHAPE, value: images })
+
+/** A picture of SHOT's still in the prompt: a draft has no row and no prompt text yet. */
+const draftOf = (img: Partial<PeekImage> = {}): PeekImage => ({ ...SHOT, id: 'draft-1-5', source: 'clipboard', stage: 'draft', messageId: undefined, promptText: undefined, ...img })
+
+/** A picture of SHOT's read back from a resumed session: its row is known by its text only. */
+const historyOf = (id: string, promptText: string): PeekImage => ({ ...SHOT, id, stage: 'history', messageId: undefined, promptText })
+
 // Stands in for the session's stored values: what an earlier event wrote.
-// `images` is kept with its shape tag, as the atom's `{ shape }` writes it.
 const seed = (values: { images?: PeekImage[]; isDebug?: boolean }) => (_: unknown, e: { key: string }) => ({
   value: {
-    value: e.key === 'images' ? { shape: 'images-2', value: values.images ?? [] } : e.key === 'isDebug' ? values.isDebug : undefined,
+    value: e.key === 'images' ? storedList(values.images ?? []) : e.key === 'isDebug' ? values.isDebug : undefined,
     version: 1,
   },
 })
@@ -181,7 +191,7 @@ test('fullscreen: the chip lights a hover scope and the band holds its picture',
 })
 
 test('fullscreen: a draft shows as a chip, its picture only on hover', { options: { graphics: 'file' } }, async ($, on) => {
-  const draft: PeekImage = { ...SHOT, id: 'draft-1-5', source: 'clipboard', messageId: undefined, promptText: undefined }
+  const draft = draftOf()
   on('state.get', seed({ images: [draft], isDebug: false }))
   on('env.get', noEnv)
   const band = await $.ui.mount(BAND)
@@ -193,7 +203,7 @@ test('fullscreen: a draft shows as a chip, its picture only on hover', { options
 })
 
 test('fullscreen: a short band never outgrows its rows; a hint stands in for a tiny picture', { options: { graphics: 'file' } }, async ($, on) => {
-  const draft: PeekImage = { ...SHOT, id: 'draft-1-5', source: 'clipboard', messageId: undefined, promptText: undefined }
+  const draft = draftOf()
   on('state.get', seed({ images: [draft], isDebug: false }))
   on('env.get', noEnv)
   // Title, picture and chip row fit the band whole.
@@ -223,13 +233,7 @@ test('graphics off: the hidden preview says how to open the picture', { options:
 })
 
 test('a resumed row matches past the source path the engine stores beside a dropped file', async ($, on) => {
-  const old: PeekImage = {
-    ...SHOT,
-    id: 'hist-5-1',
-    messageId: undefined,
-    source: 'history',
-    promptText: '[Image #1] [Image: source: /var/folders/v6/x/T/TemporaryItems/NSIRD_screencaptureui_7uILAW/Screenshot 2026-10-25 at 8.42.23 PM.png]',
-  }
+  const old = historyOf('hist-5-1', '[Image #1] [Image: source: /var/folders/v6/x/T/TemporaryItems/NSIRD_screencaptureui_7uILAW/Screenshot 2026-10-25 at 8.42.23 PM.png]')
   on('state.get', seed({ images: [old], isDebug: false }))
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
@@ -272,7 +276,7 @@ test('a macOS screenshot dropped from the Desktop is read as one path', async ()
 })
 
 test('the band above the prompt shows the draft images', async ($, on) => {
-  const draft: PeekImage = { ...SHOT, id: 'draft-1-5', messageId: undefined, promptText: undefined, source: 'clipboard' }
+  const draft = draftOf()
   on('state.get', seed({ images: [draft], isDebug: false }))
   on('env.get', noEnv)
   for (const surface of ['terminal', 'desktop'] as const) {
@@ -311,13 +315,7 @@ test("a row finds its stored image by the row id's shared prefix", async ($, on)
 })
 
 test('a resumed row finds its image past the engine reminder in the stored text', async ($, on) => {
-  const old: PeekImage = {
-    ...SHOT,
-    id: 'hist-3-1',
-    messageId: undefined,
-    source: 'history',
-    promptText: '<system-reminder>\n# Environment\nworking directory: /x\n</system-reminder>\n[Image #1]',
-  }
+  const old = historyOf('hist-3-1', '<system-reminder>\n# Environment\nworking directory: /x\n</system-reminder>\n[Image #1]')
   on('state.get', seed({ images: [old], isDebug: false }))
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
@@ -329,14 +327,7 @@ test('a resumed row finds its image past the engine reminder in the stored text'
 })
 
 test('a resumed row finds its image past a slash command record merged into its row', async ($, on) => {
-  const old: PeekImage = {
-    ...SHOT,
-    id: 'hist-5-1',
-    messageId: undefined,
-    source: 'history',
-    promptText:
-      '<command-name>/peek</command-name> <command-message>peek</command-message> <command-args></command-args> <local-command-stdout>image-peek: 0 images.</local-command-stdout> [Image #1] [Image #2] test',
-  }
+  const old = historyOf('hist-5-1', '<command-name>/peek</command-name> <command-message>peek</command-message> <command-args></command-args> <local-command-stdout>image-peek: 0 images.</local-command-stdout> [Image #1] [Image #2] test')
   on('state.get', seed({ images: [old], isDebug: false }))
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
@@ -348,7 +339,7 @@ test('a resumed row finds its image past a slash command record merged into its 
 })
 
 test('the pane lists a submitted picture under Sent before its stored bytes arrive', async ($, on) => {
-  const submitted: PeekImage = { ...SHOT, id: 'draft-1-5', source: 'clipboard', messageId: undefined }
+  const submitted = draftOf({ stage: 'submitted', promptText: 'fix the margin in [Image #1]' })
   on('state.get', seed({ images: [submitted], isDebug: false }))
   const ui = await $.ui.mount({
     plugin: 'image-peek',
@@ -363,19 +354,23 @@ test('the pane lists a submitted picture under Sent before its stored bytes arri
 })
 
 test('a picture goes from the draft to its sent row; the next draft stays', async () => {
-  const draft = (n: number, addedAt: number): PeekImage => ({ ...SHOT, id: `draft-${n}-${addedAt}`, n, source: 'clipboard', messageId: undefined, promptText: undefined, addedAt })
+  const draft = (n: number, addedAt: number) => draftOf({ id: `draft-${n}-${addedAt}`, n, addedAt })
   let list = addDraft(addDraft([], draft(1, 1)), draft(1, 2)) // a second paste of #1 replaces the first
   expect(drafts(list).map(img => img.id)).toEqual(['draft-1-2'])
 
-  list = tagDrafts(list, 'fix the margin in [Image #1]')
-  expect([drafts(list).length, sent(list).length]).toEqual([0, 1])
+  list = submitDrafts(list, 'fix the margin in [Image #1]')
+  expect([drafts(list).length, sent(list).map(img => img.stage)]).toEqual([0, ['submitted']])
   // Before its bytes are stored, the row finds the picture by its text.
   expect(forRow(list, '08e22b78-772c-44ea-8c48-000000000000', 'fix the margin in [Image #1]').map(img => img.id)).toEqual(['draft-1-2'])
 
   list = addDraft(list, draft(1, 3)) // the next prompt's #1
-  const stored: PeekImage = { ...SHOT, id: 'msg-1', messageId: '08e22b78-772c-44ea-8c48-220f9dd6f0cb', addedAt: 4 }
-  list = storePrompt(list, [stored], { messageId: stored.messageId, text: 'fix the margin in [Image #1]' })
-  expect(list.map(img => img.id)).toEqual(['draft-1-3', 'msg-1'])
+  // The stored bytes come in as fresh pictures: the step gives them their stage.
+  const stored: PeekImage = { ...SHOT, id: 'msg-1', stage: 'draft', messageId: '08e22b78-772c-44ea-8c48-220f9dd6f0cb', addedAt: 4 }
+  list = storePrompt(list, [stored], { messageId: stored.messageId, text: 'fix the margin in [Image #1]', stage: 'stored' })
+  expect(list.map(img => [img.id, img.stage])).toEqual([
+    ['draft-1-3', 'draft'],
+    ['msg-1', 'stored'],
+  ])
   expect(forRow(list, '08e22b78-772c-44ea-8c48-000000000000', 'anything').map(img => img.id)).toEqual(['msg-1'])
 })
 
@@ -389,6 +384,18 @@ test('a resumed row is read back unless this session sent as many rows of its te
   expect(unread([sentOnce], [row(2, 'a'), row(7, 'b')]).map(r => r.idPrefix)).toEqual(['hist-7'])
   // A row read back on an earlier load is not read again.
   expect(unread([{ ...SHOT, id: 'hist-7-1' }], [row(7, 'b')])).toEqual([])
+  // A picture read back is not one sent here: another row of its text is still new.
+  expect(unread([historyOf('hist-2-1', '[Image #1] test')], [row(7, 'b')]).map(r => r.idPrefix)).toEqual(['hist-7'])
+})
+
+test('a stored row replaces only what was submitted with its text, never a picture read back', async () => {
+  const old = historyOf('hist-2-1', '[Image #1] test')
+  const submitted = draftOf({ stage: 'submitted', promptText: '[Image #1] test' })
+  const list = storePrompt([old, submitted], [{ ...SHOT, id: 'msg-1' }], { messageId: 'msg-1', text: '[Image #1] test', stage: 'stored' })
+  expect(list.map(img => [img.id, img.stage])).toEqual([
+    ['hist-2-1', 'history'],
+    ['msg-1', 'stored'],
+  ])
 })
 
 // A 1 x 2 BMP, red over blue (blue over red when flipped): every cell it is
@@ -446,7 +453,7 @@ test('blocks: a sent picture draws a placeholder, then its cells once made off t
 test('blocks: a picture cleared and then restored at the same path draws its cells again, made afresh', { options: { graphics: 'blocks' } }, async ($, on) => {
   const clock = mock.clock(on)
   // A store the mod can write: `/peek clear` empties the list.
-  const stored = new Map<string, unknown>([['images', { shape: 'images-2', value: [SHOT] }]])
+  const stored = new Map<string, unknown>([['images', storedList([SHOT])]])
   let version = 1
   on('state.get', (_, e) => ({ value: { value: stored.get(e.key), version } }))
   on('state.set', (_, e) => {
@@ -483,7 +490,7 @@ test('blocks: a picture cleared and then restored at the same path draws its cel
   // A resumed session reads the same row back to the same file names, with
   // other pixels in them: the cleared picture's cells are not drawn again.
   bmp = tinyBmp(true)
-  stored.set('images', { shape: 'images-2', value: [SHOT] })
+  stored.set('images', storedList([SHOT]))
   const again = await drawsCells()
   expect(again).toBeDefined()
   expect(again).not.toEqual(first)
@@ -491,7 +498,7 @@ test('blocks: a picture cleared and then restored at the same path draws its cel
 
 test('blocks: a /peek clear while cells are made keeps none; the picture restored at the same path draws its own', { options: { graphics: 'blocks' } }, async ($, on) => {
   const clock = mock.clock(on)
-  const stored = new Map<string, unknown>([['images', { shape: 'images-2', value: [SHOT] }]])
+  const stored = new Map<string, unknown>([['images', storedList([SHOT])]])
   let version = 1
   on('state.get', (_, e) => ({ value: { value: stored.get(e.key), version } }))
   on('state.set', (_, e) => {
@@ -536,7 +543,7 @@ test('blocks: a /peek clear while cells are made keeps none; the picture restore
   await drawsCells()
   expect(isCleared).toBe(true)
   bmp = tinyBmp(true)
-  stored.set('images', { shape: 'images-2', value: [SHOT] })
+  stored.set('images', storedList([SHOT]))
   const again = await drawsCells()
   expect(again).toBe(bmpToCells(tinyBmp(true), 28, 7))
   expect(again).not.toBe(bmpToCells(tinyBmp(), 28, 7))
@@ -626,7 +633,7 @@ test('a stored prompt still being made when the session switches is not kept, an
   await clock.settle()
 
   expect(isSwitched).toBe(true)
-  expect(stored.get('images')).toEqual({ shape: 'images-2', value: [] })
+  expect(stored.get('images')).toEqual(storedList([]))
   expect(left()).toEqual(['.lease'])
 })
 
@@ -654,7 +661,7 @@ test('a resumed session reads its prompts\' pictures back from the conversation'
 })
 
 test("a sent row's chip opens the pane on its picture; Back goes to the list", async ($, on) => {
-  const stored = new Map<string, unknown>([['images', { shape: 'images-2', value: [SHOT] }]])
+  const stored = new Map<string, unknown>([['images', storedList([SHOT])]])
   on('state.get', (_, e) => ({ value: { value: stored.get(e.key), version: 1 } }))
   on('state.set', (_, e) => {
     stored.set(e.key, e.value)
