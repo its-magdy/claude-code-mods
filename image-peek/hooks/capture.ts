@@ -9,7 +9,8 @@
 import type { EngineInterface, PluginOptions, PromptBox, PromptChangeInput, PromptEditInput, PromptSubmitInput } from 'claude-code'
 
 import type { PeekSource } from '../types'
-import { imagePaths, isImageFile, platform } from './host'
+import { platform } from './host'
+import type { Shot } from './host'
 import { addDraft, dropDrafts, hasDraft, placeholders, submitDrafts } from './list'
 import { offerPane } from './pane'
 import { warm } from './picture'
@@ -26,6 +27,13 @@ let isDeniedTold = false
 
 /** A paste names an image path for a placeholder the engine puts in within this long. */
 const PATH_WINDOW_MS = 3_000
+
+/** A screenshot saved this long ago or less may be the file a drop named. */
+const SHOT_WINDOW_MS = 120_000
+
+const IMAGE_FILE = /\.(png|jpe?g|gif|webp|heic|heif|tiff?|bmp)$/i
+
+const isImageFile = (path: string) => IMAGE_FILE.test(path)
 
 /** What intake remembers for a generation's drafts; a new generation starts with none of it. */
 const intake = perGeneration(() => ({
@@ -188,7 +196,8 @@ async function pickSource(
   // turned its path into the placeholder unseen), likely a screenshot saved
   // in the last two minutes, or the same clipboard image was pasted again.
   // A guess either way: the sent bytes replace it.
-  const { path: shot, isDenied } = await p.recentScreenshot(120_000, usedShots)
+  const { files: shots, isDenied } = await p.screenshots()
+  const shot = newestShot(shots, await $.clock.now(), usedShots)
   void probe($, 'screenshot', { n, isFound: shot !== undefined, isDenied })
   if (shot) {
     usedShots.add(shot)
@@ -207,4 +216,40 @@ async function pickSource(
 async function copied($: $, work: Work, path: string) {
   const [copy] = await copyDropped($, work, [path])
   return copy === undefined ? undefined : { file: copy, source: 'file' as const }
+}
+
+/**
+ * The newest image among the screenshot folders' `files` saved in the last
+ * two minutes that no other placeholder took (`skip`). A file dropped into
+ * the prompt reaches the engine without passing `prompt.edit`, so this is
+ * how the draft finds it.
+ */
+function newestShot(files: readonly Shot[], now: number, skip: ReadonlySet<string>) {
+  let best: Shot | undefined
+  for (const f of files) {
+    if (!isImageFile(f.path) || skip.has(f.path) || now - f.mtimeMs > SHOT_WINDOW_MS) continue
+    if (!best || f.mtimeMs > best.mtimeMs) best = f
+  }
+  return best?.path
+}
+
+/**
+ * The image files a paste names: paths as a terminal types them for a drop
+ * (`/a/b\ c.png`, `'/a/b c.png'`, `file:///a/b%20c.png`), one or several.
+ */
+export function imagePaths(text: string): string[] {
+  // Split on ASCII whitespace only: macOS names a screenshot "… at 8.31.06\u202fPM.png",
+  // and that narrow no-break space is whitespace to `\s`.
+  const tokens = text.trim().match(/'[^']+'|"[^"]+"|(?:\\.|[^ \t\r\n\\])+/g) ?? []
+  return tokens
+    .map(token => {
+      // A Windows path keeps its backslashes; elsewhere they escape a space.
+      const bare = /^['"]/.test(token)
+        ? token.slice(1, -1)
+        : /^[A-Za-z]:\\/.test(token)
+          ? token
+          : token.replace(/\\(.)/g, '$1')
+      return bare.startsWith('file://') ? decodeURIComponent(bare.slice('file://'.length)) : bare
+    })
+    .filter(path => /^(\/|~\/|[A-Za-z]:\\)/.test(path) && isImageFile(path))
 }

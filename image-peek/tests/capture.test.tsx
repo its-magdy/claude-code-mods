@@ -26,13 +26,18 @@ const promptEdit = ($: Parameters<TestBody>[0], e: PromptEditInput) =>
 /**
  * The world beneath the mod for a capture: stored values in memory, the
  * prompt box, and the machine with the clipboard, the screenshots on the
- * Desktop and the other files a paste may name.
+ * Desktop and the other files a paste may name. macOS with no terminal of
+ * its own unless `os` names another, its `env` set, its session folder `dir`.
  */
 function world(
   on: On,
   options: {
     clipboard: Clipboard
     prompt: string
+    os?: 'linux' | 'wsl'
+    env?: Record<string, string>
+    dir?: string
+    magick?: 'magick' | 'convert'
     desktop?: string[]
     disk?: string[]
     onRun?: (argv: readonly string[]) => unknown
@@ -59,12 +64,13 @@ function world(
     const text = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
     return { text, cursor: e.start + e.inputText.length }
   })
-  const { clipboard, desktop, disk, onRun } = options
-  const { left } = machine(on, { env: {}, clipboard, desktop, disk, onRun })
+  const { clipboard, desktop, disk, onRun, os, magick, dir = DIR } = options
+  const { left, runs } = machine(on, { os, env: options.env ?? (os ? undefined : {}), clipboard, desktop, disk, onRun, magick })
   const list = () => ((stored.get('images') as { value?: PeekImage[] } | undefined)?.value ?? []) as PeekImage[]
   return {
     clock,
-    files: () => left(DIR),
+    runs,
+    files: () => left(dir),
     toasts,
     list,
     setPrompt: (text: string) => {
@@ -218,4 +224,89 @@ test('a placeholder deleted from the draft takes its picture and files with it',
   await w.clock.settle()
   expect(w.list()).toEqual([])
   expect(w.files()).toEqual(['.lease'])
+})
+
+const LINUX_DIR = '/run/user/1000/claude-image-peek/sess-1'
+const LINUX_PNG: Clipboard = { types: ['image/png', 'text/plain'], isImage: true }
+const WAYLAND = { XDG_RUNTIME_DIR: '/run/user/1000', WAYLAND_DISPLAY: 'wayland-0' }
+
+/** The tools the mod ran, in order, of those named. */
+const tools = (w: ReturnType<typeof world>, names: string[]) => w.runs.map(r => r.argv[0]!).filter(tool => names.includes(tool))
+
+test('on Linux under Wayland the clipboard image is read with wl-paste', { options: { graphics: 'off' } }, async ($, on) => {
+  const w = world(on, { os: 'linux', env: WAYLAND, dir: LINUX_DIR, clipboard: LINUX_PNG, prompt: '' })
+  await paste($, w, '[Image #1]')
+
+  const [img] = w.list()
+  expect([img?.n, img?.source, img?.width, img?.height]).toEqual([1, 'clipboard', 800, 400])
+  expect(w.files()).toEqual(['.lease', `${img!.id}.png`, `${img!.id}.small.png`, `${img!.id}.thumb.png`])
+  expect(tools(w, ['wl-paste', 'xclip'])).toEqual(['wl-paste'])
+})
+
+test('on Linux under X the clipboard image is read with xclip, into ~/.cache with no runtime dir', { options: { graphics: 'off' } }, async ($, on) => {
+  const w = world(on, { os: 'linux', env: { HOME: '/home/me' }, dir: '/home/me/.cache/claude-image-peek/sess-1', clipboard: LINUX_PNG, prompt: '' })
+  await paste($, w, '[Image #1]')
+
+  const [img] = w.list()
+  expect([img?.n, img?.source]).toEqual([1, 'clipboard'])
+  expect(w.files()).toEqual(['.lease', `${img!.id}.png`, `${img!.id}.small.png`, `${img!.id}.thumb.png`])
+  expect(tools(w, ['wl-paste', 'xclip'])).toEqual(['xclip'])
+})
+
+test('on Linux a clipboard tool that writes old text for the image is not taken at its word', async ($, on) => {
+  const w = world(on, { os: 'linux', env: WAYLAND, dir: LINUX_DIR, clipboard: { ...LINUX_PNG, isGarbled: true }, prompt: '' })
+  await paste($, w, '[Image #1]')
+
+  expect(w.list()).toEqual([])
+  expect(w.toasts).toContain('Image #1: it will show once sent.')
+  expect(w.files()).toEqual(['.lease'])
+})
+
+test("on Linux with only ImageMagick 6 the thumbnails are made by convert", { options: { graphics: 'off' } }, async ($, on) => {
+  const w = world(on, { os: 'linux', env: WAYLAND, dir: LINUX_DIR, clipboard: LINUX_PNG, prompt: '', magick: 'convert' })
+  await paste($, w, '[Image #1]')
+
+  const [img] = w.list()
+  expect(w.files()).toEqual(['.lease', `${img!.id}.png`, `${img!.id}.small.png`, `${img!.id}.thumb.png`])
+  // Each conversion tries 7's magick first.
+  expect(tools(w, ['magick', 'convert'])).toEqual(['magick', 'convert', 'magick', 'convert'])
+})
+
+test('on Linux a file copied in the file manager is taken from the path its URI names', { options: { graphics: 'off' } }, async ($, on) => {
+  const cat = '/home/me/My Pictures/cat.png'
+  const w = world(on, { os: 'linux', env: WAYLAND, dir: LINUX_DIR, clipboard: { types: ['text/uri-list'], isImage: false, file: cat }, disk: [cat], prompt: '' })
+  await paste($, w, '[Image #1]')
+
+  const [img] = w.list()
+  expect([img?.n, img?.source]).toEqual([1, 'file'])
+  expect(w.runs.find(r => r.argv[0] === 'cp')?.argv[1]).toBe(cat)
+})
+
+const WSL_DIR = '/home/me/.cache/claude-image-peek/sess-1'
+
+test("on WSL PowerShell saves the clipboard image at the session folder's Windows path", { options: { graphics: 'off' } }, async ($, on) => {
+  const w = world(on, { os: 'wsl', dir: WSL_DIR, clipboard: { types: [], isImage: true }, prompt: '' })
+  await paste($, w, '[Image #1]')
+
+  const [img] = w.list()
+  expect([img?.n, img?.source, img?.width, img?.height]).toEqual([1, 'clipboard', 800, 400])
+  expect(img?.path).toBe(`${WSL_DIR}/${img!.id}.png`)
+  expect(w.files()).toEqual(['.lease', `${img!.id}.png`, `${img!.id}.small.png`, `${img!.id}.thumb.png`])
+  const grab = w.runs.find(r => r.argv.at(-1)!.includes('GetFileDropList'))!.argv.at(-1)!
+  expect(grab).toContain(`'\\\\wsl.localhost\\Ubuntu\\home\\me\\.cache\\claude-image-peek\\sess-1\\${img!.id}.png'`)
+})
+
+test('on WSL a file Explorer copied is read from its Linux path', { options: { graphics: 'off' } }, async ($, on) => {
+  const w = world(on, {
+    os: 'wsl',
+    dir: WSL_DIR,
+    clipboard: { types: [], isImage: false, file: 'C:\\Users\\me\\cat.png' },
+    disk: ['/mnt/c/Users/me/cat.png'],
+    prompt: '',
+  })
+  await paste($, w, '[Image #1]')
+
+  const [img] = w.list()
+  expect([img?.n, img?.source]).toEqual([1, 'file'])
+  expect(w.runs.find(r => r.argv[0] === 'cp')?.argv[1]).toBe('/mnt/c/Users/me/cat.png')
 })

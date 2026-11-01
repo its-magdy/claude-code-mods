@@ -1,14 +1,53 @@
 // The machine beneath the mod, faked at the process seam: the files the
-// mod's commands read, write and delete, the clipboard as `osascript` reads
-// it, and the environment and session id the engine hands back. What the
-// commands do is known here alone: macOS's tools and Windows' PowerShell. A
-// command this file does not know succeeds and is recorded.
+// mod's commands read, write and delete, the clipboard as each OS's tool
+// reads it, and the environment and session id the engine hands back. What
+// the commands do is known here alone: macOS's tools, Linux's (wl-paste,
+// xclip, ImageMagick), Windows' PowerShell, and WSL's wslpath between the
+// two. A command this file does not know succeeds and is recorded.
 
 import type { FsStat, On } from 'claude-code'
 
 import { toBase64 } from '../hooks/base64'
 
-export type Clipboard = { change: number; types: string[]; isImage: boolean }
+export type Clipboard = {
+  /** macOS's change counter. */
+  change?: number
+  types: string[]
+  isImage: boolean
+  /** A file copied in the file manager, as the OS names it. */
+  file?: string
+  /** The tool writes old text where the image should be (xclip under Wayland). */
+  isGarbled?: boolean
+}
+
+type Os = 'mac' | 'windows' | 'linux' | 'wsl'
+
+const UNAME: Record<Os, string> = {
+  mac: 'Darwin 25.0.0',
+  linux: 'Linux 6.8.0-45-generic',
+  wsl: 'Linux 5.15.153.1-microsoft-standard-WSL2',
+  windows: '',
+}
+
+const ENV: Record<Os, Record<string, string>> = {
+  mac: { TMPDIR: '/t/' },
+  linux: { XDG_RUNTIME_DIR: '/run/user/1000' },
+  wsl: { WSL_DISTRO_NAME: 'Ubuntu', HOME: '/home/me' },
+  windows: { OS: 'Windows_NT', LOCALAPPDATA: 'C:\\L' },
+}
+
+// WSL's paths as Windows programs name them, as wslpath maps them: a drive
+// under /mnt, the distribution's own files under \\wsl.localhost.
+const WSL_SHARE = '\\\\wsl.localhost\\Ubuntu'
+const toWin = (path: string) => {
+  const drive = path.match(/^\/mnt\/([a-z])(\/.*)?$/)
+  return drive ? `${drive[1]!.toUpperCase()}:${(drive[2] ?? '\\').replace(/\//g, '\\')}` : `${WSL_SHARE}${path.replace(/\//g, '\\')}`
+}
+const toLinux = (path: string) => {
+  const drive = path.match(/^([A-Za-z]):\\(.*)$/)
+  if (drive) return `/mnt/${drive[1]!.toLowerCase()}/${drive[2]!.replace(/\\/g, '/')}`
+  return path.startsWith(`${WSL_SHARE}\\`) ? path.slice(WSL_SHARE.length).replace(/\\/g, '/') : path
+}
 
 export type Run = { argv: string[]; stdin?: string }
 
@@ -37,19 +76,24 @@ const pngHead = (width: number, height: number) => {
 }
 
 /**
- * A session `sess-1` on macOS (or Windows). On macOS TMPDIR is `/t/` unless
- * `env` names the variables set; on Windows OS and LOCALAPPDATA (`C:\L`) are.
+ * A session `sess-1` on macOS (or Linux, Windows, WSL). Unless `env` names
+ * the variables set, on macOS TMPDIR is `/t/`; on Linux XDG_RUNTIME_DIR is
+ * `/run/user/1000` (X, not Wayland); on WSL HOME is `/home/me` in the
+ * distribution `Ubuntu`; on Windows OS and LOCALAPPDATA (`C:\L`) are set.
  * `stats` holds what is on disk to begin with, `disk` more files by path, and
  * `desktop` the screenshots on `/Desktop` (HOME unset), saved when the clock
- * started. A conversion (`sips`, or PowerShell's `$b.Save`) succeeds when
+ * started. A conversion (`sips`, ImageMagick's `magick` or, with `magick:
+ * 'convert'`, only 6's `convert`, or PowerShell's `$b.Save`) succeeds when
  * `isConverting` and its source is there; the header read finds an 800 x 400
- * PNG in any file that is. `onRun` runs before each process.
+ * PNG in any file that is, save a garbled clipboard's. `onRun` runs before
+ * each process.
  */
 export function machine(
   on: On,
   options: {
-    os?: 'mac' | 'windows'
+    os?: Os
     env?: Record<string, string>
+    magick?: 'magick' | 'convert'
     clipboard?: Clipboard
     stats?: Record<string, FsStat>
     disk?: string[]
@@ -58,14 +102,19 @@ export function machine(
     onRun?: (argv: readonly string[]) => unknown
   } = {},
 ) {
-  const { os = 'mac', isConverting = true } = options
-  const env = options.env ?? (os === 'windows' ? { OS: 'Windows_NT', LOCALAPPDATA: 'C:\\L' } : { TMPDIR: '/t/' })
+  const { os = 'mac', isConverting = true, magick = 'magick', clipboard } = options
+  const env = options.env ?? ENV[os]
   const disk = new Map<string, FsStat>(Object.entries(options.stats ?? {}))
   for (const path of options.disk ?? []) disk.set(path, file())
   for (const name of options.desktop ?? []) disk.set(`/Desktop/${name}`, file())
   const runs: Run[] = []
   const writes: { path: string; text: string }[] = []
   const isThere = (path: string) => disk.get(path)?.kind === 'file'
+  /** Files whose bytes are text, not a PNG. */
+  const garbled = new Set<string>()
+  // PowerShell under WSL names this side's files by their Windows paths.
+  const fromPs = os === 'wsl' ? toLinux : (path: string) => path
+  const uriList = clipboard?.file ? `file://${encodeURI(clipboard.file)}\n` : ''
 
   on('session.id', () => ({ value: 'sess-1' }))
   on('env.get', (_, e) => ({ value: env[e.name] }))
@@ -91,12 +140,27 @@ export function machine(
     // Each command that reads a file fails, as the real one does, when it is not there.
     switch (argv[0]) {
       case 'uname':
-        return ok('Darwin 25.0.0')
+        return ok(UNAME[os])
       case 'osascript': {
-        const { clipboard } = options
+        if (clipboard?.file) return ok(JSON.stringify({ change: clipboard.change, types: clipboard.types, file: clipboard.file }))
         if (clipboard?.isImage) disk.set(argv.at(-1)!, file())
         return ok(JSON.stringify({ change: clipboard?.change, types: clipboard?.types ?? [], isSaved: clipboard?.isImage || undefined }))
       }
+      case 'wl-paste':
+      case 'xclip': {
+        const type = argv[0] === 'wl-paste' ? argv.at(-1) : argv[argv.indexOf('-t') + 1]
+        if (type === '--list-types' || type === 'TARGETS') return ok((clipboard?.types ?? []).join('\n'))
+        return type === 'text/uri-list' ? ok(uriList) : ran(1, '', `no ${type}`)
+      }
+      case 'magick':
+      case 'convert': {
+        if (argv[0] !== magick) return ran(127, '', 'command not found')
+        if (!isConverting || !isThere(argv[1]!)) return ran(1, '', 'no such file')
+        disk.set(argv.at(-1)!.replace(/^[A-Za-z0-9]+:/, ''), file())
+        return ok()
+      }
+      case 'wslpath':
+        return ok(`${argv[1] === '-w' ? toWin(argv[2]!) : toLinux(argv[2]!)}\n`)
       case 'sips': {
         if (!isConverting || !isThere(argv[argv.indexOf('--out') - 1]!)) return ran(1, '', 'no such file')
         disk.set(argv.at(-1)!, file())
@@ -108,7 +172,15 @@ export function machine(
           disk.set(path, file())
           return ok()
         }
-        return isThere(path) ? ok(pngHead(800, 400)) : ran(1, '', 'no such file')
+        // The clipboard's PNG, written by wl-paste or xclip.
+        if (argv[2]?.includes('image/png')) {
+          if (!clipboard?.isImage) return ran(1, '', 'no image/png')
+          disk.set(path, file())
+          if (clipboard.isGarbled) garbled.add(path)
+          return ok()
+        }
+        if (!isThere(path)) return ran(1, '', 'no such file')
+        return ok(garbled.has(path) ? toBase64(new TextEncoder().encode('old clipboard text')) : pngHead(800, 400))
       }
       case 'cp': {
         if (!isThere(argv[1]!)) return ran(1, '', 'no such file')
@@ -126,8 +198,13 @@ export function machine(
         return ran(1, '', 'not set')
       case 'powershell.exe': {
         const script = argv.at(-1)!
-        const paths = quoted(script)
-        if (script.startsWith('Remove-Item')) {
+        const paths = quoted(script).map(fromPs)
+        if (script.includes('GetFileDropList')) {
+          if (clipboard?.file) return ok(JSON.stringify({ file: clipboard.file }))
+          if (!clipboard?.isImage) return ok('{}')
+          disk.set(paths[0]!, file())
+          return ok('{"isSaved":true}')
+        } else if (script.startsWith('Remove-Item')) {
           const isDir = script.includes(' -Recurse ')
           for (const gone of paths) {
             for (const path of disk.keys()) if (path === gone || (isDir && path.startsWith(`${gone}\\`))) disk.delete(path)
