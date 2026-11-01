@@ -49,11 +49,6 @@ export class Lru<V> {
     this.total -= entry.weight
   }
 
-  /** Drops every key `match` accepts. */
-  deleteWhere(match: (key: string) => boolean) {
-    for (const key of [...this.entries.keys()]) if (match(key)) this.delete(key)
-  }
-
   get size() {
     return this.entries.size
   }

@@ -16,7 +16,6 @@ import { join, makeFolder, removeFiles, sessionFolder } from './folder'
 import type { Folder } from './folder'
 import { platform, pngSize } from './host'
 import { capped } from './list'
-import { forget } from './picture'
 import { probe } from './session'
 
 type $ = EngineInterface
@@ -50,6 +49,9 @@ export function perGeneration<T>(make: () => T): (work?: Work) => T {
     return held.value
   }
 }
+
+/** The current generation: every listed picture was made in it. */
+export const generationNow = () => generation
 
 /** What a step of stale work throws; `later` and `run` catch it and end the work. */
 class Stale extends Error {}
@@ -112,12 +114,10 @@ export async function keep($: $, work: Work, change: (list: PeekImage[]) => Peek
 }
 
 /**
- * Lets go of pictures that left the list: what was kept to draw them, and
- * with `files: 'delete'` every file of theirs (each under its id, and its PNG
- * by path).
+ * Lets go of pictures that left the list: with `files: 'delete'` every file
+ * of theirs (each under its id, and its PNG by path).
  */
 async function release($: $, dropped: readonly PeekImage[], files: 'delete' | 'leave') {
-  for (const img of dropped) forget(img)
   if (files === 'leave' || dropped.length === 0) return
   await removeFiles($, await sessionFolder($), dropped.map(img => img.id), dropped.map(img => img.path))
 }
