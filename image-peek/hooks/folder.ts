@@ -8,7 +8,7 @@
 import type { EngineInterface, NextBudget, SessionEndInput } from 'claude-code'
 
 import { osOf, platform } from './host'
-import type { Host } from './host'
+import type { Os } from './host'
 
 type $ = EngineInterface
 
@@ -16,20 +16,23 @@ const LEASE = '.lease'
 const DAY = 24 * 60 * 60 * 1000
 const HOUR = 60 * 60 * 1000
 
-const cached = new Map<string, Host>()
+/** A session's folder for pictures, and the OS that names the paths in it. */
+export type Folder = { os: Os; dir: string }
+
+const cached = new Map<string, Folder>()
 const made = new Set<string>()
 
 /**
- * The platform and this session's folder for pictures. Per session id, since
- * a /clear starts a new one. A folder only this user reads: macOS's TMPDIR is
- * per user; on Linux the runtime dir or ~/.cache, never the shared /tmp.
+ * This session's folder for pictures. Per session id, since a /clear starts
+ * a new one. A folder only this user reads: macOS's TMPDIR is per user; on
+ * Linux the runtime dir or ~/.cache, never the shared /tmp.
  */
-export async function host($: $): Promise<Host> {
-  return hostFor($, await $.session.id())
+export async function sessionFolder($: $): Promise<Folder> {
+  return folderOf($, await $.session.id())
 }
 
 /** The same for a session named by id: an ending session's, after the process moved on. */
-async function hostFor($: $, sessionId: string): Promise<Host> {
+async function folderOf($: $, sessionId: string): Promise<Folder> {
   const session = sessionId.replace(/[^A-Za-z0-9_-]/g, '') || 'unnamed'
   const known = cached.get(session)
   if (known) return known
@@ -43,20 +46,28 @@ async function hostFor($: $, sessionId: string): Promise<Host> {
     const runtime = await $.env.get('XDG_RUNTIME_DIR')
     root = runtime ? `${runtime}/claude-image-peek` : `${(await $.env.get('HOME')) ?? '/tmp'}/.cache/claude-image-peek`
   }
-  const h: Host = { os, dir: `${root}${os === 'windows' ? '\\' : '/'}${session}` }
-  cached.set(session, h)
-  return h
+  const f: Folder = { os, dir: `${root}${sep(os)}${session}` }
+  cached.set(session, f)
+  return f
 }
 
-export const join = (h: Host, name: string) =>
-  `${h.dir}${h.os === 'windows' ? '\\' : '/'}${name}`
+const sep = (os: Os) => (os === 'windows' ? '\\' : '/')
+
+/** The path of the file named `name` in the folder. */
+export const join = (f: Folder, name: string) => `${f.dir}${sep(f.os)}${name}`
+
+/** The folder all sessions' folders are in. */
+const rootOf = (f: Folder) => f.dir.slice(0, f.dir.lastIndexOf(sep(f.os)))
+
+/** Another session's folder, named `name`, beside this one. */
+const sibling = (f: Folder, name: string): Folder => ({ os: f.os, dir: `${rootOf(f)}${sep(f.os)}${name}` })
 
 /**
  * This session's folder, made (`$.fs.write` creates the directories),
  * readable by this user alone, and its lease renewed.
  */
-export async function makeFolder($: $): Promise<Host> {
-  const h = await host($)
+export async function makeFolder($: $): Promise<Folder> {
+  const h = await sessionFolder($)
   await $.fs.write(join(h, LEASE), String(await $.clock.now()))
   if (made.has(h.dir)) return h
   await (await platform($)).makePrivate(h.dir)
@@ -64,15 +75,18 @@ export async function makeFolder($: $): Promise<Host> {
   return h
 }
 
-/** Deletes files of the session's folder whose names start with one of the ids, or are named in `exact`. */
-export async function removeFiles($: $, h: Host, ids: readonly string[], exact: readonly string[] = []) {
-  if (ids.length === 0 && exact.length === 0) return
+/**
+ * Deletes the folder's files whose names start with one of the ids, and
+ * those of `paths` that are in it.
+ */
+export async function removeFiles($: $, h: Folder, ids: readonly string[], paths: readonly string[] = []) {
+  if (ids.length === 0 && paths.length === 0) return
   const names = (await $.fs.list(h.dir).catch(() => [])).map(entry => entry.name)
-  const doomed = names.filter(
-    name => exact.includes(name) || ids.some(id => name.startsWith(`${id}.`) || name.startsWith(`${id}-`)),
-  )
+  const doomed = names
+    .filter(name => ids.some(id => name.startsWith(`${id}.`) || name.startsWith(`${id}-`)) || paths.includes(join(h, name)))
+    .map(name => join(h, name))
   if (doomed.length === 0) return
-  await (await platform($)).removeFiles(doomed.map(name => join(h, name)))
+  await (await platform($)).removeFiles(doomed)
 }
 
 /**
@@ -90,18 +104,16 @@ export function started($: $) {
  * a crash): those whose lease no live session has renewed for a day.
  */
 export async function sweep($: $) {
-  const h = await host($)
-  const sep = h.os === 'windows' ? '\\' : '/'
-  const root = h.dir.slice(0, h.dir.lastIndexOf(sep))
+  const h = await sessionFolder($)
   const now = await $.clock.now()
-  const entries = await $.fs.list(root).catch(() => [])
+  const entries = await $.fs.list(rootOf(h)).catch(() => [])
   for (const entry of entries) {
     if (entry.kind !== 'dir' || !/^[A-Za-z0-9_-]+$/.test(entry.name)) continue
-    const dir = `${root}${sep}${entry.name}`
-    if (dir === h.dir) continue
-    const lease = await $.fs.stat(`${dir}${sep}${LEASE}`).catch(() => undefined)
-    const stat = lease ?? (await $.fs.stat(dir).catch(() => undefined))
-    if (stat && now - stat.mtimeMs > DAY) await removeDir($, { os: h.os, dir })
+    const other = sibling(h, entry.name)
+    if (other.dir === h.dir) continue
+    const lease = await $.fs.stat(join(other, LEASE)).catch(() => undefined)
+    const stat = lease ?? (await $.fs.stat(other.dir).catch(() => undefined))
+    if (stat && now - stat.mtimeMs > DAY) await removeDir($, other)
   }
 }
 
@@ -113,16 +125,17 @@ export async function sweep($: $) {
  * it leaves, the next start sweeps.
  */
 export async function ended($: $, e: SessionEndInput, budget: NextBudget): Promise<(() => Promise<void>) | undefined> {
-  const old = await hostFor($, e.sessionId)
+  const old = await folderOf($, e.sessionId)
   if (e.reason === 'clear' || e.reason === 'resume') return () => removeDir($, old)
   if (old.os !== 'windows' && budget.remainingMs > 300) await removeDir($, old)
   return undefined
 }
 
 /** Deletes a session's folder of pictures. */
-async function removeDir($: $, h: Host) {
+async function removeDir($: $, h: Folder) {
   // Only ever a session's own folder under ours: never the parent, never empty.
-  if (!/claude-image-peek[\\/][A-Za-z0-9_-]+$/.test(h.dir)) return
+  const root = rootOf(h)
+  if (!root.endsWith('claude-image-peek') || !/^[A-Za-z0-9_-]+$/.test(h.dir.slice(root.length + 1))) return
   made.delete(h.dir)
   await (await platform($)).removeDir(h.dir)
 }

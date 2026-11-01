@@ -11,8 +11,6 @@ type $ = EngineInterface
 
 export type Os = 'mac' | 'linux' | 'windows' | 'wsl'
 
-export type Host = { os: Os; dir: string }
-
 /** What the clipboard held when we looked. */
 export type Grab = {
   /** A file the clipboard names (Finder's or Explorer's copy). */
