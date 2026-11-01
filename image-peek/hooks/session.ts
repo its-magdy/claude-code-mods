@@ -1,8 +1,7 @@
-// What the session's hooks share: the layout the last drawing saw, and the
-// debug lines.
+// What the session's hooks share: the terminal's layout, and the debug lines.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, RenderViewport } from 'claude-code'
+import type { EngineInterface, RenderSurface, RenderViewport } from 'claude-code'
 
 type $ = EngineInterface
 
@@ -13,10 +12,18 @@ const isDebug = atom({ plugin: 'image-peek', key: 'isDebug' } as const, false)
 // Module state: rebuilt after a reload, and nothing drawn depends on it alone.
 let isFullscreenSeen: boolean | undefined
 
-/** Keeps the layout a drawing reports; the mouse and iTerm2's bytes need the fullscreen one. */
-export function noteViewport(viewport: RenderViewport | undefined) {
-  if (viewport?.isFullscreen !== undefined) isFullscreenSeen = viewport.isFullscreen
+/**
+ * Keeps the terminal's layout from one of its drawings: every terminal
+ * drawing reports it, and it holds for the session. A remote surface's
+ * drawing reports its own (the mobile app's is never fullscreen), so it is
+ * not kept: the mouse, iTerm2's bytes and a pane opened unasked go by the
+ * terminal's.
+ */
+export function noteLayout(e: { surface: RenderSurface; viewport?: RenderViewport }) {
+  if (e.surface === 'terminal' && e.viewport?.isFullscreen !== undefined) isFullscreenSeen = e.viewport.isFullscreen
 }
+
+/** Whether the terminal shows the fullscreen layout; false until one of its drawings said. */
 export const isFullscreen = () => isFullscreenSeen === true
 
 /** Whether probe lines go to the transcript (`/peek debug`) rather than the debug log. */

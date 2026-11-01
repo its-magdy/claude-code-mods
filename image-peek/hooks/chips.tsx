@@ -33,12 +33,11 @@ const KEYS: Record<Where, { box: string; button: string }> = {
 
 /**
  * Whether chips show their pictures on hover: a terminal in the fullscreen
- * layout, where a pointer reaches them. The band goes by the last layout a
- * drawing reported, as its own drawing may report none; a row goes by its own.
+ * layout, where a pointer reaches them. A drawing goes by the layout it
+ * reports, else by the terminal's (see session.ts), as a drawing may report none.
  */
-function canHover(e: Input, where: Where) {
-  if (e.surface !== 'terminal') return false
-  return where === 'band' ? isFullscreen() : e.viewport?.isFullscreen === true
+function canHover(e: Input) {
+  return e.surface === 'terminal' && (e.viewport?.isFullscreen ?? isFullscreen())
 }
 
 /** The pictures whose chips can be hovered: the draft's in the band, the sent ones' in the transcript. */
@@ -87,7 +86,7 @@ export async function drawBand($: $, e: RenderInput<'AbovePrompt'>, options: Plu
   if (e.props.hasSurvey) return undefined
   const list = await pictures($)
   const inPrompt = drafts(list)
-  const isHover = canHover(e, 'band')
+  const isHover = canHover(e)
   const hovered = isHover ? hoverable(list) : []
   if (inPrompt.length === 0 && hovered.length === 0) return undefined
   const { Box } = $.ui.resolve(e)
@@ -165,7 +164,7 @@ export async function drawRow(
   }
 
   const { Box, Text } = $.ui.resolve(e)
-  if (!canHover(e, 'message')) {
+  if (!canHover(e)) {
     const thumbs = await Promise.all(mine.map(img => draw($, e, options, img, 'inline', INLINE.columns, INLINE.rows)))
     return (
       <Box flexDirection="column">

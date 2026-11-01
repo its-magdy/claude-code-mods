@@ -8,7 +8,7 @@ import { latest } from './list'
 import { graphics } from './picture'
 import { PANE, drawPane, openPane, resetPane } from './pane'
 import { later, pictures, reset } from './pictures'
-import { noteViewport, toggleDebug } from './session'
+import { noteLayout, toggleDebug } from './session'
 import { keepSent, loadHistory } from './stored'
 
 export const register: Register = (on, options) => {
@@ -82,17 +82,17 @@ export const register: Register = (on, options) => {
   // The band above the prompt and a sent prompt's row: a chip per picture,
   // pressed to show it big in the pane (see chips.tsx).
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    noteViewport(e.viewport)
+    noteLayout(e)
     return (await drawBand($, e, options)) ?? next(e)
   })
 
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
-    noteViewport(e.viewport)
+    noteLayout(e)
     return (await drawRow($, e, options, () => next(e))) ?? next(e)
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    noteViewport(e.viewport)
+    noteLayout(e)
     return drawPane($, e, options)
   })
 
