@@ -10,7 +10,7 @@ import type { PeekImage } from '../types'
 import { platform } from './host'
 import { MAX_KEPT, placeholders, storePrompt, textOf, unread } from './list'
 import { warm } from './picture'
-import { claim, finish, keep, pictures } from './pictures'
+import { fileFor, finish, keep, pictures } from './pictures'
 import type { Work } from './pictures'
 import { probe } from './session'
 
@@ -40,7 +40,7 @@ async function keepPrompt(
     const n = named[i] ?? i + 1
     const ext = (source.media_type ?? 'image/png').split('/')[1]?.replace('jpeg', 'jpg') ?? 'png'
     const id = `${where.idPrefix}-${n}`
-    const raw = await claim($, work, `${id}.${ext}`)
+    const raw = await fileFor($, work, { role: 'source', id, ext })
     const entry = (await p.writeBase64(source.data, raw))
       ? await finish($, work, { id, n, source: 'transcript', stage: where.stage, file: raw, messageId: where.messageId, promptText: text })
       : undefined

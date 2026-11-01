@@ -9,7 +9,7 @@ import { Lru } from './cache'
 import { platform } from './host'
 import { MAX_KEPT } from './list'
 import { bmpToCells } from './raster'
-import { claim, folder, generationNow, isLive, later, run } from './pictures'
+import { fileFor, folder, generationNow, isLive, later, run } from './pictures'
 import type { Work } from './pictures'
 import { isFullscreen, probe } from './session'
 
@@ -129,7 +129,7 @@ async function convertCells($: $, img: PeekImage, size: Size, key: string) {
       cellCache.set(key, null)
       return
     }
-    const bmp = await claim($, work, `${img.id}-${size.columns}x${size.rows}.bmp`)
+    const bmp = await fileFor($, work, { role: 'cells', id: img.id, ...size })
     const ok = await (await platform($)).toBmp(img.small, bmp, size.columns, size.rows * 2)
     const { base64 } = ok ? await $.fs.read(bmp, { as: 'bytes' }).catch(() => ({ base64: '' })) : { base64: '' }
     // Dropped while its cells were made (a newer generation drops every

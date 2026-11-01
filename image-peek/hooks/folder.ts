@@ -64,20 +64,6 @@ export async function makeFolder($: $): Promise<Folder> {
 }
 
 /**
- * Deletes the folder's files whose names start with one of the ids, and
- * those of `paths` that are in it.
- */
-export async function removeFiles($: $, h: Folder, ids: readonly string[], paths: readonly string[] = []) {
-  if (ids.length === 0 && paths.length === 0) return
-  const names = (await $.fs.list(h.dir).catch(() => [])).map(entry => entry.name)
-  const doomed = names
-    .filter(name => ids.some(id => name.startsWith(`${id}.`) || name.startsWith(`${id}-`)) || paths.includes(join(h, name)))
-    .map(name => join(h, name))
-  if (doomed.length === 0) return
-  await (await platform($)).removeFiles(doomed)
-}
-
-/**
  * The session started: its folder's lease is renewed every hour, idle or
  * not, while it lives, so no other session's sweep takes it for abandoned.
  */

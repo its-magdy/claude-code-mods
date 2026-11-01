@@ -34,6 +34,8 @@ const draftOf = (img: Partial<PeekImage> = {}): PeekImage => ({ ...SHOT, id: 'dr
 /** A picture of SHOT's read back from a resumed session: its row is known by its text only. */
 const historyOf = (id: string, promptText: string): PeekImage => ({ ...SHOT, id, stage: 'history', messageId: undefined, promptText })
 
+const DIR_OF_SHOT = '/tmp/claude-image-peek/s'
+
 // Stands in for the session's stored values: what an earlier event wrote.
 const seed = (values: { images?: PeekImage[]; isDebug?: boolean }) => (_: unknown, e: { key: string }) => ({
   value: {
@@ -460,7 +462,7 @@ test('blocks: a picture cleared and then restored at the same path draws its cel
     stored.set(e.key, e.value)
     return { value: { isSet: true, version: ++version } }
   })
-  machine(on, { env: {}, disk: [SHOT.small] })
+  const disk = machine(on, { env: {}, disk: [SHOT.small] })
   let bmp = tinyBmp()
   on('fs.read', () => ({ value: { base64: bmp } }))
   on('ui.log', () => ({ value: undefined }))
@@ -487,8 +489,11 @@ test('blocks: a picture cleared and then restored at the same path draws its cel
   const first = await drawsCells()
   expect(first).toBeDefined()
   await $.command.run({ command: 'peek', args: 'clear', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
-  // A resumed session reads the same row back to the same file names, with
-  // other pixels in them: the cleared picture's cells are not drawn again.
+  // The clear deleted the picture's files where it recorded them. A resumed
+  // session reads the same row back to the same file names, with other
+  // pixels in them: the cleared picture's cells are not drawn again.
+  expect(disk.left(DIR_OF_SHOT)).toEqual([])
+  disk.put(SHOT.small)
   bmp = tinyBmp(true)
   stored.set('images', storedList([SHOT]))
   const again = await drawsCells()
@@ -506,7 +511,7 @@ test('blocks: a /peek clear while cells are made keeps none; the picture restore
     return { value: { isSet: true, version: ++version } }
   })
   let isCleared = false
-  machine(on, {
+  const disk = machine(on, {
     env: {},
     disk: [SHOT.small],
     // The person clears the list while the first cells' BMP is made.
@@ -542,6 +547,8 @@ test('blocks: a /peek clear while cells are made keeps none; the picture restore
   // The cells made after the clear, of the old pixels, are not kept.
   await drawsCells()
   expect(isCleared).toBe(true)
+  // Made again by the restore, at the same path.
+  disk.put(SHOT.small)
   bmp = tinyBmp(true)
   stored.set('images', storedList([SHOT]))
   const again = await drawsCells()
@@ -602,6 +609,40 @@ test('on Windows a stored prompt keeps its PNG and thumbnails; the step file and
 
   await $.command.run({ command: 'peek', args: 'clear', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
   expect(left()).toEqual(['.lease'])
+})
+
+test('a stored prompt past the cap deletes the oldest picture\'s files, a dropped file\'s copy among them', { options: { graphics: 'file' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000 })
+  on('ui.log', () => ({ value: undefined }))
+  // MAX_KEPT pictures listed, the oldest a dropped file's copy.
+  const kept: PeekImage[] = Array.from({ length: 40 }, (_, i) => ({
+    ...SHOT,
+    id: `old-${i}`,
+    path: i === 0 ? `${STORE_DIR}/drop-1-1.png` : `${STORE_DIR}/old-${i}.png`,
+    thumb: `${STORE_DIR}/old-${i}.thumb.png`,
+    small: `${STORE_DIR}/old-${i}.small.png`,
+    messageId: `m-${i}`,
+    addedAt: i + 1,
+  }))
+  const stored = new Map<string, unknown>([['images', storedList(kept)]])
+  let version = 1
+  on('state.get', (_, e) => ({ value: { value: stored.get(e.key), version } }))
+  on('state.set', (_, e) => {
+    stored.set(e.key, e.value)
+    return { value: { isSet: true, version: ++version } }
+  })
+  const { left } = machine(on, { disk: kept.flatMap(img => [img.path, img.thumb, img.small]) })
+  const { uuid } = await storeJpeg($)
+  await clock.settle()
+
+  const list = (stored.get('images') as { value: PeekImage[] }).value
+  expect(list.length).toBe(40)
+  expect(list.some(img => img.id === 'old-0')).toBe(false)
+  const files = left(STORE_DIR)
+  expect(files.filter(f => f.startsWith('drop-') || f.startsWith('old-0.'))).toEqual([])
+  expect(files).toContain('old-1.png')
+  expect(files).toContain(`${uuid}-1.png`)
+  expect(files.length).toBe(1 + 40 * 3)
 })
 
 test('a stored prompt whose picture cannot be converted leaves no files behind', { options: { graphics: 'file' } }, async ($, on) => {

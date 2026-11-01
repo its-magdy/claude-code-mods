@@ -229,6 +229,8 @@ export function machine(
     runs,
     /** Every file the mod wrote with `fs.write`, in order. */
     writes,
+    /** Puts a file at `path`, as another program would. */
+    put: (path: string) => void disk.set(local(path), file()),
     /** The names of the files left in `dir`, sorted. */
     left: (dir: string) => [...disk].filter(([path, stat]) => stat.kind === 'file' && parentOf(path) === dir).map(([path]) => path.slice(dir.length + 1)).sort(),
     /** What the mod deleted, by `rm` or PowerShell's `Remove-Item`. */
