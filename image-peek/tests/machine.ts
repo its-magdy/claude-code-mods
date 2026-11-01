@@ -1,8 +1,8 @@
 // The machine beneath the mod, faked at the process seam: the files the
 // mod's commands read, write and delete, the clipboard as `osascript` reads
 // it, and the environment and session id the engine hands back. What the
-// macOS commands do is known here alone; Windows' PowerShell runs succeed and
-// are recorded, as do commands this file does not know.
+// commands do is known here alone: macOS's tools and Windows' PowerShell. A
+// command this file does not know succeeds and is recorded.
 
 import type { FsStat, On } from 'claude-code'
 
@@ -14,7 +14,13 @@ export type Run = { argv: string[]; stdin?: string }
 
 const file = (mtimeMs = 0): FsStat => ({ kind: 'file', size: 1, mtimeMs, isLink: false })
 
-const parentOf = (path: string) => path.slice(0, path.lastIndexOf('/'))
+const parentOf = (path: string) => path.slice(0, Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')))
+
+// The test runs on POSIX, which reads a Windows path as relative and puts the cwd before it.
+const local = (path: string) => (/[A-Za-z]:\\/.test(path) ? path.slice(path.search(/[A-Za-z]:\\/)) : path)
+
+// The paths a PowerShell script names, in order: its single-quoted strings.
+const quoted = (script: string) => [...script.matchAll(/'((?:[^']|'')*)'/g)].map(m => m[1]!.replace(/''/g, "'"))
 
 const ran = (exitCode: number, stdout = '', stderr = '') => ({
   value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false },
@@ -35,9 +41,9 @@ const pngHead = (width: number, height: number) => {
  * `env` names the variables set; on Windows OS and LOCALAPPDATA (`C:\L`) are.
  * `stats` holds what is on disk to begin with, `disk` more files by path, and
  * `desktop` the screenshots on `/Desktop` (HOME unset), saved when the clock
- * started. `sips` succeeds when `isConverting` and its source is there; the
- * header read finds an 800 x 400 PNG in any file that is. `onRun` runs
- * before each process.
+ * started. A conversion (`sips`, or PowerShell's `$b.Save`) succeeds when
+ * `isConverting` and its source is there; the header read finds an 800 x 400
+ * PNG in any file that is. `onRun` runs before each process.
  */
 export function machine(
   on: On,
@@ -65,14 +71,15 @@ export function machine(
   on('env.get', (_, e) => ({ value: env[e.name] }))
   on('fs.write', (_, e) => {
     writes.push({ path: e.path, text: String(e.text) })
-    disk.set(e.path, file())
+    disk.set(local(e.path), file())
     return { value: undefined }
   })
-  on('fs.list', (_, e) => ({
-    value: [...disk].filter(([path]) => parentOf(path) === e.path).map(([path, stat]) => ({ name: path.slice(e.path.length + 1), ...stat })),
-  }))
+  on('fs.list', (_, e) => {
+    const dir = local(e.path)
+    return { value: [...disk].filter(([path]) => parentOf(path) === dir).map(([path, stat]) => ({ name: path.slice(dir.length + 1), ...stat })) }
+  })
   on('fs.stat', (_, e) => {
-    const stat = disk.get(e.path)
+    const stat = disk.get(local(e.path))
     if (!stat) throw new Error('ENOENT')
     return { value: stat }
   })
@@ -117,6 +124,24 @@ export function machine(
       }
       case 'defaults':
         return ran(1, '', 'not set')
+      case 'powershell.exe': {
+        const script = argv.at(-1)!
+        const paths = quoted(script)
+        if (script.startsWith('Remove-Item')) {
+          const isDir = script.includes(' -Recurse ')
+          for (const gone of paths) {
+            for (const path of disk.keys()) if (path === gone || (isDir && path.startsWith(`${gone}\\`))) disk.delete(path)
+          }
+        } else if (script.startsWith('[IO.File]::WriteAllBytes')) {
+          disk.set(paths[0]!, file())
+        } else if (script.includes('[IO.File]::OpenRead')) {
+          return isThere(paths[0]!) ? ok(pngHead(800, 400)) : ran(1, '', 'no such file')
+        } else if (script.includes('$b.Save(')) {
+          if (!isConverting || !isThere(paths[0]!)) return ran(1, '', 'no such file')
+          disk.set(paths.at(-1)!, file())
+        }
+        return ok()
+      }
       default:
         return ok()
     }
