@@ -1,7 +1,8 @@
 // The platform's commands: one adapter per OS, the OS found once per process.
 // macOS and Linux use their own tools; Windows uses PowerShell; WSL uses
 // Linux's tools for files and Windows' for the clipboard, converting and
-// opening, with each path mapped across.
+// opening, with each path mapped across. Only what varies by OS lives here:
+// where this user's private files go, how paths are joined, and the commands.
 
 import type { EngineInterface } from 'claude-code'
 
@@ -9,7 +10,7 @@ import { fromBase64 } from './base64'
 
 type $ = EngineInterface
 
-export type Os = 'mac' | 'linux' | 'windows' | 'wsl'
+type Os = 'mac' | 'linux' | 'windows' | 'wsl'
 
 /** What the clipboard held when we looked. */
 export type Grab = {
@@ -23,9 +24,26 @@ export type Grab = {
   error?: string
 }
 
+/** How the OS names a file in a folder, and the folder a path is in. */
+export type Paths = {
+  join(dir: string, name: string): string
+  parentOf(path: string): string
+}
+
+/** A file in a folder screenshots are saved to, and when it was saved. */
+export type Shot = { path: string; mtimeMs: number }
+
 /** One OS's commands, bound to the hook's `$`. */
 export type Platform = {
-  os: Os
+  paths: Paths
+  /**
+   * A folder only this user reads, for the mod's files: macOS's per-user
+   * TMPDIR; on Linux the runtime dir or ~/.cache, never the shared /tmp;
+   * Windows' per-user LOCALAPPDATA.
+   */
+  privateRoot(): Promise<string>
+  /** Whether deleting a folder fits a session exit's short budget (PowerShell's start-up does not). */
+  isRemovalQuick: boolean
   /** A path a Windows program named, as this side names it (WSL maps it; elsewhere the same). */
   localPath(path: string): Promise<string>
   /** Saves the clipboard's image to `out` (a PNG), or names the file it holds. */
@@ -49,21 +67,16 @@ export type Platform = {
   /** Opens the file in the platform's viewer (Preview on macOS). */
   openExternally(path: string): Promise<boolean>
   /**
-   * The newest screenshot saved in the last `withinMs` (macOS only). A file
-   * dropped into the prompt reaches the engine without passing `prompt.edit`,
-   * so this is how the draft finds it.
+   * The files in the folders screenshots are saved to (macOS only; none
+   * elsewhere), and whether the OS refused to list one.
    */
-  recentScreenshot(withinMs: number, skip: ReadonlySet<string>): Promise<{ path?: string; isDenied: boolean }>
+  screenshots(): Promise<{ files: Shot[]; isDenied: boolean }>
 }
-
-const IMAGE_FILE = /\.(png|jpe?g|gif|webp|heic|heif|tiff?|bmp)$/i
-
-export const isImageFile = (path: string) => IMAGE_FILE.test(path)
 
 let detected: Os | undefined
 
 /** This machine's OS, found once. */
-export async function osOf($: $): Promise<Os> {
+async function osOf($: $): Promise<Os> {
   if (detected) return detected
   if ((await $.env.get('OS')) === 'Windows_NT') {
     detected = 'windows'
@@ -92,20 +105,6 @@ export async function platform($: $): Promise<Platform> {
   }
 }
 
-/** Whether the file starts with the PNG signature. */
-export async function isPng(p: Platform, path: string) {
-  const head = await p.readHead(path)
-  return head !== undefined && head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47
-}
-
-/** A PNG's width and height from its header, or zeros. */
-export async function pngSize(p: Platform, path: string) {
-  const head = await p.readHead(path)
-  if (!head || head.length < 24) return { width: 0, height: 0 }
-  const view = new DataView(head.buffer, head.byteOffset, head.byteLength)
-  return { width: view.getUint32(16), height: view.getUint32(20) }
-}
-
 async function run($: $, argv: string[], stdin?: string) {
   try {
     return await $.process.run(argv, { stdin, timeoutMs: 15_000 })
@@ -132,13 +131,27 @@ const parse = (text: string): Grab => {
 
 const same = async (path: string) => path
 
-const noScreenshot = async () => ({ isDenied: false })
+const noScreenshots = async () => ({ files: [], isDenied: false })
+
+const pathsWith = (sep: string): Paths => ({
+  join: (dir, name) => `${dir}${sep}${name}`,
+  parentOf: path => path.slice(0, path.lastIndexOf(sep)),
+})
+
+const posixPaths = pathsWith('/')
+
+/** Linux's (and WSL's) private folder: the runtime dir, else ~/.cache. */
+async function linuxRoot($: $) {
+  return (await $.env.get('XDG_RUNTIME_DIR')) || `${(await $.env.get('HOME')) ?? '/tmp'}/.cache`
+}
 
 /** File commands with the POSIX tools: macOS, Linux, and WSL's side. */
-function posixFiles($: $): Pick<Platform, 'makePrivate' | 'copyFile' | 'writeBase64' | 'removeFiles' | 'removeDir' | 'readHead'> {
+function posixFiles($: $): Pick<Platform, 'paths' | 'isRemovalQuick' | 'makePrivate' | 'copyFile' | 'writeBase64' | 'removeFiles' | 'removeDir' | 'readHead'> {
   return {
+    paths: posixPaths,
+    isRemovalQuick: true,
     makePrivate: async dir => {
-      await run($, ['chmod', '700', dir.slice(0, dir.lastIndexOf('/')), dir])
+      await run($, ['chmod', '700', posixPaths.parentOf(dir), dir])
     },
     copyFile: async (from, to) => (await run($, ['cp', from, to])).exitCode === 0,
     writeBase64: async (base64, out) => (await run($, ['sh', '-c', 'base64 --decode > "$1"', 'sh', out], base64)).exitCode === 0,
@@ -175,8 +188,9 @@ function run(argv) {
 
 function mac($: $): Platform {
   return {
-    os: 'mac',
     ...posixFiles($),
+    privateRoot: async () =>
+      ((await $.env.get('TMPDIR')) ?? `${(await $.env.get('HOME')) ?? ''}/Library/Caches`).replace(/\/+$/, ''),
     localPath: same,
     grabClipboard: async out => {
       const r = await run($, ['osascript', '-l', 'JavaScript', '-e', MAC_GRAB, out])
@@ -189,15 +203,15 @@ function mac($: $): Platform {
     toBmp: async (from, out, width, height) =>
       (await run($, ['sips', '-z', String(height), String(width), '-s', 'format', 'bmp', from, '--out', out])).exitCode === 0,
     openExternally: async path => (await run($, ['open', path])).exitCode === 0,
-    recentScreenshot: (withinMs, skip) => macScreenshot($, withinMs, skip),
+    screenshots: () => macScreenshots($),
   }
 }
 
 /**
- * From the folder screenshots go to (Desktop unless set otherwise) or the
- * temporary folder its floating thumbnail is dragged from.
+ * The files in the folder screenshots go to (Desktop unless set otherwise)
+ * and the temporary folders their floating thumbnails are dragged from.
  */
-async function macScreenshot($: $, withinMs: number, skip: ReadonlySet<string>) {
+async function macScreenshots($: $) {
   let isDenied = false
   // macOS refuses to list Desktop and the temporary folder to a terminal
   // without Full Disk Access (or Files and Folders access).
@@ -216,33 +230,29 @@ async function macScreenshot($: $, withinMs: number, skip: ReadonlySet<string>) 
       if (entry.kind === 'dir' && entry.name.startsWith('NSIRD_screencaptureui')) folders.push(`${items}/${entry.name}`)
     }
   }
-  const now = await $.clock.now()
-  let best: { path: string; mtimeMs: number } | undefined
+  const files: Shot[] = []
   for (const folder of folders) {
     for (const entry of await list(folder)) {
-      const path = `${folder}/${entry.name}`
-      if (entry.kind !== 'file' || !isImageFile(entry.name) || skip.has(path) || now - entry.mtimeMs > withinMs) continue
-      if (!best || entry.mtimeMs > best.mtimeMs) best = { path, mtimeMs: entry.mtimeMs }
+      if (entry.kind === 'file') files.push({ path: `${folder}/${entry.name}`, mtimeMs: entry.mtimeMs })
     }
   }
-  return { path: best?.path, isDenied }
+  return { files, isDenied }
 }
 
 function linux($: $): Platform {
-  const p: Platform = {
-    os: 'linux',
+  return {
     ...posixFiles($),
+    privateRoot: () => linuxRoot($),
     localPath: same,
-    grabClipboard: out => linuxGrab($, p, out),
+    grabClipboard: out => linuxGrab($, out),
     toPng: async (from, out, max) => {
       const resize = max ? ['-resize', `${max}x${max}>`] : []
       return magick($, [from, ...resize, `png:${out}`])
     },
     toBmp: (from, out, width, height) => magick($, [from, '-resize', `${width}x${height}!`, `BMP3:${out}`]),
     openExternally: async path => (await run($, ['xdg-open', path])).exitCode === 0,
-    recentScreenshot: noScreenshot,
+    screenshots: noScreenshots,
   }
-  return p
 }
 
 /** ImageMagick 7's `magick`, else 6's `convert`. */
@@ -253,7 +263,7 @@ async function magick($: $, args: string[]) {
   return false
 }
 
-async function linuxGrab($: $, p: Platform, out: string): Promise<Grab> {
+async function linuxGrab($: $, out: string): Promise<Grab> {
   const isWayland = Boolean(await $.env.get('WAYLAND_DISPLAY'))
   const list = isWayland
     ? await run($, ['wl-paste', '--list-types'])
@@ -274,13 +284,19 @@ async function linuxGrab($: $, p: Platform, out: string): Promise<Grab> {
   const argv = read('image/png').map(a => `'${a}'`).join(' ')
   const r = await run($, ['sh', '-c', `${argv} > "$1"`, 'sh', out])
   // xclip under Wayland can hand back old text and still exit 0: check the bytes.
-  return { types, isSaved: r.exitCode === 0 && (await isPng(p, out)) }
+  return { types, isSaved: r.exitCode === 0 && isPng(await posixFiles($).readHead(out)) }
 }
+
+/** Whether a file's head starts with the PNG signature. */
+const isPng = (head: Uint8Array | undefined) =>
+  head !== undefined && head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47
 
 function windows($: $): Platform {
   return {
-    os: 'windows',
     ...windowsImages($, same, same),
+    paths: pathsWith('\\'),
+    privateRoot: async () => (await $.env.get('LOCALAPPDATA')) ?? (await $.env.get('TEMP')) ?? 'C:\\Windows\\Temp',
+    isRemovalQuick: false,
     localPath: same,
     makePrivate: async () => {},
     copyFile: async (from, to) =>
@@ -298,7 +314,7 @@ function windows($: $): Platform {
       headOf(await powershell($, `$b = New-Object byte[] 32; $f = [IO.File]::OpenRead(${quotePs(path)}); $n = $f.Read($b, 0, 32); $f.Close(); [Convert]::ToBase64String($b, 0, $n)`)),
     openExternally: async path =>
       (await run($, ['powershell.exe', '-NoProfile', '-Command', `Start-Process -FilePath ${quotePs(path)}`])).exitCode === 0,
-    recentScreenshot: noScreenshot,
+    screenshots: noScreenshots,
   }
 }
 
@@ -306,16 +322,16 @@ function wsl($: $): Platform {
   const toWin = (path: string) => winPath($, path)
   const toLinux = (path: string) => linuxPath($, path)
   return {
-    os: 'wsl',
     ...posixFiles($),
     ...windowsImages($, toWin, toLinux),
+    privateRoot: () => linuxRoot($),
     localPath: toLinux,
     openExternally: async path => {
       await run($, ['explorer.exe', await toWin(path)])
       // explorer.exe exits 1 even when it opened the file.
       return true
     },
-    recentScreenshot: noScreenshot,
+    screenshots: noScreenshots,
   }
 }
 
@@ -368,25 +384,4 @@ ${size}
 $b = New-Object Drawing.Bitmap $i, (New-Object Drawing.Size $w, $ht)
 $b.Save(${dst}, [Drawing.Imaging.ImageFormat]::${format}); $b.Dispose(); $i.Dispose()`
   return (await powershell($, script)).exitCode === 0
-}
-
-/**
- * The image files a paste names: paths as a terminal types them for a drop
- * (`/a/b\ c.png`, `'/a/b c.png'`, `file:///a/b%20c.png`), one or several.
- */
-export function imagePaths(text: string): string[] {
-  // Split on ASCII whitespace only: macOS names a screenshot "… at 8.31.06\u202fPM.png",
-  // and that narrow no-break space is whitespace to `\s`.
-  const tokens = text.trim().match(/'[^']+'|"[^"]+"|(?:\\.|[^ \t\r\n\\])+/g) ?? []
-  return tokens
-    .map(token => {
-      // A Windows path keeps its backslashes; elsewhere they escape a space.
-      const bare = /^['"]/.test(token)
-        ? token.slice(1, -1)
-        : /^[A-Za-z]:\\/.test(token)
-          ? token
-          : token.replace(/\\(.)/g, '$1')
-      return bare.startsWith('file://') ? decodeURIComponent(bare.slice('file://'.length)) : bare
-    })
-    .filter(path => /^(\/|~\/|[A-Za-z]:\\)/.test(path) && isImageFile(path))
 }

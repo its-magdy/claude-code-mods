@@ -14,7 +14,8 @@ import type { EngineInterface } from 'claude-code'
 import type { PeekImage } from '../types'
 import { join, makeFolder, removeFiles, sessionFolder } from './folder'
 import type { Folder } from './folder'
-import { platform, pngSize } from './host'
+import { platform } from './host'
+import type { Platform } from './host'
 import { capped } from './list'
 import { probe } from './session'
 
@@ -171,6 +172,14 @@ export async function finish(
   const { width, height } = await pngSize(p, shown)
   const { file: _file, ...rest } = base
   return { ...rest, path, thumb: shown, small: smallShown, width, height, addedAt: await $.clock.now() }
+}
+
+/** A PNG's width and height from its header, or zeros. */
+async function pngSize(p: Platform, path: string) {
+  const head = await p.readHead(path)
+  if (!head || head.length < 24) return { width: 0, height: 0 }
+  const view = new DataView(head.buffer, head.byteOffset, head.byteLength)
+  return { width: view.getUint32(16), height: view.getUint32(20) }
 }
 
 /**
