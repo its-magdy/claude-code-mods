@@ -148,13 +148,14 @@ export async function pictures($: $) {
 
 /**
  * Changes the list for the work, capped to the newest MAX_KEPT, and lets go
- * of the entries it drops (see `release`). Stale work stops here, the change
- * not made.
+ * of the entries it drops (see `release`); resolves to the list as kept.
+ * Stale work stops here, the change not made.
  */
 export async function keep($: $, work: Work, change: (list: PeekImage[]) => PeekImage[]) {
   stopIfStale(work)
   let isKept = false
   let dropped: PeekImage[] = []
+  let kept: PeekImage[] = []
   await update($, images, list => {
     // Checked on every run: an update can run again after a /peek clear that
     // came in the meantime, and must not bring old pictures back.
@@ -163,12 +164,13 @@ export async function keep($: $, work: Work, change: (list: PeekImage[]) => Peek
       dropped = []
       return list
     }
-    const next = capped(change([...list]))
-    dropped = list.filter(img => !next.some(kept => kept.id === img.id))
-    return next
+    kept = capped(change([...list]))
+    dropped = list.filter(img => !kept.some(entry => entry.id === img.id))
+    return kept
   })
   await release($, dropped, 'delete')
   if (!isKept) throw new Stale('stale work')
+  return kept
 }
 
 /**

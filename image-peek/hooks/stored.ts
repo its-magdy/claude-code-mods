@@ -6,11 +6,10 @@
 
 import type { ApiContentBlock, EngineInterface, PluginOptions } from 'claude-code'
 
-import type { PeekImage } from '../types'
-import { platform } from './host'
+import { admit } from './admit'
+import type { Arrival } from './admit'
 import { MAX_KEPT, placeholders, storePrompt, textOf, unread } from './list'
-import { warm } from './picture'
-import { fileFor, finish, keep, pictures } from './pictures'
+import { pictures } from './pictures'
 import type { Work } from './pictures'
 import { probe } from './session'
 
@@ -28,30 +27,21 @@ async function keepPrompt(
   if (blocks.length === 0) return
   const text = textOf(content)
   const named = placeholders(text)
-  const p = await platform($)
 
-  // What isn't kept (a failed write or conversion, a list a /peek clear or
-  // a switch got to first) goes when the work ends; an earlier, listed copy
-  // of this row has the same names, so those stay.
-  const kept: PeekImage[] = []
+  // What isn't listed (a failed write or conversion, the cap, a list a /peek
+  // clear or a switch got to first) goes when the work ends; an earlier,
+  // listed copy of this row has the same names, so those stay.
+  const arrivals: Arrival[] = []
   for (const [i, block] of blocks.entries()) {
     const source = block.source as { type?: string; media_type?: string; data?: string } | undefined
     if (source?.type !== 'base64' || typeof source.data !== 'string') continue
     const n = named[i] ?? i + 1
     const ext = (source.media_type ?? 'image/png').split('/')[1]?.replace('jpeg', 'jpg') ?? 'png'
     const id = `${where.idPrefix}-${n}`
-    const raw = await fileFor($, work, { role: 'source', id, ext })
-    const entry = (await p.writeBase64(source.data, raw))
-      ? await finish($, work, { id, n, source: 'transcript', stage: where.stage, file: raw, messageId: where.messageId, promptText: text })
-      : undefined
-    if (entry) kept.push(entry)
+    arrivals.push({ id, n, source: 'transcript', stage: where.stage, base64: source.data, ext, messageId: where.messageId, promptText: text })
   }
-  void probe($, where.stage, { messageId: where.messageId, named, kept: kept.length, chars: text.length })
-  if (kept.length === 0) return
-  await keep($, work, list => storePrompt(list, kept, { messageId: where.messageId, text, stage: where.stage }))
-  // The cap may have left out the oldest of these; only listed pictures get cells.
-  const listed = await pictures($)
-  for (const img of kept) if (listed.some(entry => entry.id === img.id)) await warm($, options, img)
+  const listed = await admit($, options, work, arrivals, (list, made) => storePrompt(list, made, { messageId: where.messageId, text, stage: where.stage }))
+  void probe($, where.stage, { messageId: where.messageId, named, kept: listed.length, chars: text.length })
 }
 
 /** A resumed session's pictures, read back from the conversation; each user row by its place, so equal texts stay apart. */
