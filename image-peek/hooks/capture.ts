@@ -13,8 +13,8 @@ import { platform } from './host'
 import type { Shot } from './host'
 import { addDraft, dropDrafts, hasDraft, placeholders, submitDrafts } from './list'
 import { offerPane } from './pane'
-import { warm } from './picture'
-import { fileFor, finish, folder, keep, later, perGeneration, pictures, run } from './pictures'
+import { admit } from './admit'
+import { fileFor, folder, keep, later, perGeneration, pictures, run } from './pictures'
 import type { Work } from './pictures'
 import { probe } from './session'
 
@@ -153,13 +153,16 @@ async function captureDraft($: $, options: PluginOptions, work: Work, ns: number
         $.ui.toast(`Image #${n}: it will show once sent.`)
         continue
       }
-      const entry = await finish($, work, { id, n, stage: 'draft', ...picked })
-      if (!entry) continue
-      // The draft may have been sent or edited while the picture was made.
-      if (!(await $.prompt.read()).text.includes(`[Image #${n}]`)) continue
-      await keep($, work, list => addDraft(list, entry))
-      await warm($, options, entry)
-      await offerPane($, options)
+      const listed = await admit(
+        $,
+        options,
+        work,
+        [{ id, n, stage: 'draft', ...picked }],
+        (list, [entry]) => addDraft(list, entry!),
+        // The draft may have been sent or edited while the picture was made.
+        async () => (await $.prompt.read()).text.includes(`[Image #${n}]`),
+      )
+      if (listed.length > 0) await offerPane($, options)
     } finally {
       inFlight.delete(n)
     }

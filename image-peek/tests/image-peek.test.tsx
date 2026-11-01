@@ -1,3 +1,4 @@
+import type { PromptSubmitInput } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
@@ -752,6 +753,83 @@ test('a stored prompt past the cap deletes the oldest picture\'s files, a droppe
   expect(files).toContain('old-1.png')
   expect(files).toContain(`${uuid}-1.png`)
   expect(files.length).toBe(1 + 40 * 3)
+})
+
+test('blocks: the cap admits only the newest of a stored prompt\'s pictures; only the listed one is warmed, and the other\'s files go', { options: { graphics: 'blocks' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000 })
+  on('ui.log', () => ({ value: undefined }))
+  // MAX_KEPT - 1 pictures listed, each newer than what arrives now.
+  const newer: PeekImage[] = Array.from({ length: 39 }, (_, i) => ({
+    ...SHOT,
+    id: `new-${i}`,
+    path: `${STORE_DIR}/new-${i}.png`,
+    thumb: `${STORE_DIR}/new-${i}.thumb.png`,
+    small: `${STORE_DIR}/new-${i}.small.png`,
+    messageId: `m-${i}`,
+    addedAt: 2_000 + i,
+  }))
+  const stored = new Map<string, unknown>([['images', storedList(newer)]])
+  let version = 1
+  on('state.get', (_, e) => ({ value: { value: stored.get(e.key), version } }))
+  on('state.set', (_, e) => {
+    stored.set(e.key, e.value)
+    return { value: { isSet: true, version: ++version } }
+  })
+  const { left, runs } = machine(on, { disk: newer.flatMap(img => [img.path, img.thumb, img.small]) })
+  on('fs.read', () => ({ value: { base64: tinyBmp() } }))
+  const { uuid } = await $.session.append({
+    message: {
+      type: 'user',
+      role: 'user',
+      content: [
+        { type: 'text', text: 'compare [Image #1] and [Image #2]' },
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } },
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } },
+      ],
+    },
+    door: 'prompt',
+    origin: { kind: 'composer' },
+    uuid: 'row-2',
+  })
+  await clock.settle()
+
+  const list = (stored.get('images') as { value: PeekImage[] }).value
+  expect(list.length).toBe(40)
+  expect(list.filter(img => img.messageId === uuid).map(img => img.n)).toEqual([2])
+  // #1, capped out, keeps no file and gets no cells; #2 gets its cells made ahead.
+  const files = left(STORE_DIR)
+  expect(files.filter(f => f.startsWith(`${uuid}-1`))).toEqual([])
+  expect(files.filter(f => f.startsWith(`${uuid}-2`))).toEqual([`${uuid}-2.png`, `${uuid}-2.small.png`, `${uuid}-2.thumb.png`])
+  const bmps = runs.filter(({ argv }) => argv[0] === 'sips' && argv.at(-1)!.endsWith('.bmp')).map(({ argv }) => argv.at(-1)!)
+  expect(bmps.length).toBeGreaterThan(0)
+  expect(bmps.every(path => path.includes(`/${uuid}-2-`))).toBe(true)
+})
+
+test('a submit through the hook tags the draft it names with the prompt\'s text, before the stored bytes arrive', { options: { graphics: 'off' } }, async ($, on) => {
+  const stored = new Map<string, unknown>([
+    ['images', storedList([draftOf({ id: 'draft-1-5', n: 1 }), draftOf({ id: 'draft-2-6', n: 2, addedAt: 2 })])],
+  ])
+  let version = 1
+  on('state.get', (_, e) => ({ value: { value: stored.get(e.key), version } }))
+  on('state.set', (_, e) => {
+    stored.set(e.key, e.value)
+    return { value: { isSet: true, version: ++version } }
+  })
+  on('ui.log', () => ({ value: undefined }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  const submit = $.prompt as unknown as { submit: (e: PromptSubmitInput) => Promise<unknown> }
+  await submit.submit({
+    text: 'fix the margin in [Image #2]',
+    attachments: [{ type: 'image', mediaType: 'image/png' }] as unknown as PromptSubmitInput['attachments'],
+    wait: false,
+    origin: { kind: 'composer' },
+  })
+
+  const list = (stored.get('images') as { value: PeekImage[] }).value
+  expect(list.map(img => [img.n, img.stage, img.promptText])).toEqual([
+    [1, 'draft', undefined],
+    [2, 'submitted', 'fix the margin in [Image #2]'],
+  ])
 })
 
 test('a stored prompt whose picture cannot be converted leaves no files behind', { options: { graphics: 'file' } }, async ($, on) => {
