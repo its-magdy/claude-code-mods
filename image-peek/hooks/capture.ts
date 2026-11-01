@@ -13,7 +13,7 @@ import { imagePaths, isImageFile, platform } from './host'
 import { addDraft, dropDrafts, hasDraft, placeholders, tagDrafts } from './list'
 import { offerPane } from './pane'
 import { warm } from './picture'
-import { claim, finish, folder, keep, later, pictures, run } from './pictures'
+import { claim, finish, folder, keep, later, perGeneration, pictures, run } from './pictures'
 import type { Work } from './pictures'
 import { probe } from './session'
 
@@ -22,12 +22,20 @@ type $ = EngineInterface
 // Module state: rebuilt after a reload, and nothing drawn depends on it alone.
 /** The clipboard's change counter at the last grab: unchanged means no new image was copied. */
 let lastChange: number | undefined
-const inFlight = new Set<number>()
-/** Image paths a paste named with no placeholder, for one the engine puts in a moment later. */
-const recentPaths: { path: string; at: number }[] = []
-/** Screenshots already taken for a draft, so a second placeholder gets the next one. */
-const usedShots = new Set<string>()
 let isDeniedTold = false
+
+/** A paste names an image path for a placeholder the engine puts in within this long. */
+const PATH_WINDOW_MS = 3_000
+
+/** What intake remembers for a generation's drafts; a new generation starts with none of it. */
+const intake = perGeneration(() => ({
+  /** Placeholders being captured, so a second capture of one stops. */
+  inFlight: new Set<number>(),
+  /** Image paths a paste named with no placeholder, for one the engine puts in a moment later. */
+  recentPaths: [] as { path: string; at: number }[],
+  /** Screenshots already taken for a draft, so a second placeholder gets the next one. */
+  usedShots: new Set<string>(),
+}))
 
 let stamps = 0
 /** A file-name stamp no other capture or copy shares, even in the same millisecond. */
@@ -54,7 +62,8 @@ export async function edited($: $, options: PluginOptions, e: PromptEditInput, b
     capture($, options, added, 'edit', paths)
   } else if (paths.length > 0) {
     const at = await $.clock.now()
-    recentPaths.push(...paths.map(path => ({ path, at })))
+    const memory = intake()
+    memory.recentPaths = [...memory.recentPaths.filter(p => at - p.at < PATH_WINDOW_MS), ...paths.map(path => ({ path, at }))]
   }
   const removed = before.filter(n => !after.includes(n))
   if (removed.length > 0) {
@@ -79,7 +88,7 @@ export async function changed($: $, options: PluginOptions, e: PromptChangeInput
   const missing = present.filter(n => !hasDraft(list, n))
   if (missing.length === 0) return
   const at = await $.clock.now()
-  const paths = recentPaths.splice(0).filter(p => at - p.at < 3_000).map(p => p.path)
+  const paths = intake().recentPaths.splice(0).filter(p => at - p.at < PATH_WINDOW_MS).map(p => p.path)
   capture($, options, missing, `change:${e.origin.kind}`, paths)
 }
 
@@ -123,6 +132,7 @@ async function copyDropped($: $, work: Work, paths: string[]) {
 async function captureDraft($: $, options: PluginOptions, work: Work, ns: number[], via: string, files: string[]) {
   // The session folder is made even when every placeholder is skipped.
   await folder($, work)
+  const { inFlight } = intake(work)
   for (const [i, n] of ns.entries()) {
     // Claimed before any wait, so a second capture of this number stops here.
     if (inFlight.has(n)) continue
@@ -166,6 +176,7 @@ async function pickSource(
   if (file) return { file, source: 'file' }
   const p = await platform($)
   const out = await claim($, work, `${id}.png`)
+  const { usedShots } = intake(work)
   const grab = await p.grabClipboard(out)
   const isStale = grab.change !== undefined && grab.change === lastChange
   void probe($, 'clipboard', { n, via, isStale, ...grab, file: grab.file !== undefined })

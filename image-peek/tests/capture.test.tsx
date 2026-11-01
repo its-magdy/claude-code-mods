@@ -240,6 +240,21 @@ test('the clipboard unchanged since the last paste: a screenshot saved just now 
   ].sort())
 })
 
+test('a screenshot taken for a draft before a /peek clear is taken again for the next one', { options: { graphics: 'off' } }, async ($, on) => {
+  const shot = 'Screenshot 2026-10-28 at 9.00.00 PM.png'
+  const w = world(on, { clipboard: PNG_CLIPBOARD, prompt: '', desktop: [shot] })
+  await paste($, w, '[Image #1]')
+  await paste($, w, '[Image #1] [Image #2]')
+  expect(w.list().find(img => img.n === 2)?.source).toBe('file')
+
+  await $.command.run({ command: 'peek', args: 'clear', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  await paste($, w, '[Image #1]')
+
+  const [img] = w.list()
+  expect([img?.n, img?.source]).toEqual([1, 'file'])
+  expect(img?.path).toMatch(/\/drop-[0-9-]+\.png$/)
+})
+
 test('the same clipboard image pasted again, with no recent screenshot, is taken from the clipboard', { options: { graphics: 'off' } }, async ($, on) => {
   const w = world(on, { clipboard: PNG_CLIPBOARD, prompt: '' })
   await paste($, w, '[Image #1]')
