@@ -2,6 +2,8 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { FsStat } from 'claude-code'
 import type { TestBody } from 'claude-code/testing'
 
+import { machine } from './machine'
+
 type $ = Parameters<TestBody>[0]
 type On = Parameters<TestBody>[1]
 
@@ -14,41 +16,17 @@ const dir = (mtimeMs: number): FsStat => ({ kind: 'dir', size: 0, mtimeMs, isLin
 const file = (mtimeMs: number): FsStat => ({ kind: 'file', size: 1, mtimeMs, isLink: false })
 
 /**
- * A session `sess-1` on macOS (or Windows), its folder's parent holding the
- * folders `stats` names: each process the mod runs and each lease it writes
- * is recorded, and every process succeeds.
+ * A session's machine, its folder's parent holding the folders `stats` names,
+ * and the session events a start and an end need.
  */
 function world(on: On, { os = 'mac', stats = {} }: { os?: 'mac' | 'windows'; stats?: Record<string, FsStat> } = {}) {
   const clock = mock.clock(on, { now: NOW })
-  const runs: string[][] = []
-  const leases: { path: string; text: string }[] = []
-  on('session.id', () => ({ value: 'sess-1' }))
-  on('env.get', (_, e) => ({ value: os === 'windows' ? { OS: 'Windows_NT', LOCALAPPDATA: 'C:\\L' }[e.name] : e.name === 'TMPDIR' ? '/t/' : undefined }))
   on('ui.log', () => ({ value: undefined }))
   on('session.messages', () => ({ value: [] }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
-  on('fs.write', (_, e) => {
-    leases.push({ path: e.path, text: String(e.text) })
-    return { value: undefined }
-  })
-  on('fs.list', (_, e) => ({
-    value: Object.entries(stats)
-      .filter(([path]) => path.slice(0, path.lastIndexOf('/')) === e.path)
-      .map(([path, stat]) => ({ name: path.slice(path.lastIndexOf('/') + 1), ...stat })),
-  }))
-  on('fs.stat', (_, e) => {
-    const stat = stats[e.path]
-    if (!stat) throw new Error('ENOENT')
-    return { value: stat }
-  })
-  on('process.run', (_, e) => {
-    runs.push([...e.argv])
-    return { value: { exitCode: 0, stdout: e.argv[0] === 'uname' ? 'Darwin 25.0.0' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-  })
-  const removed = () => runs.filter(argv => argv[0] === 'rm' || argv.at(-1)?.startsWith('Remove-Item')).map(argv => argv.at(-1)!)
-  return { clock, runs, leases, removed }
+  return { clock, ...machine(on, { os, stats }) }
 }
 
 const start = ($: $) => $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
@@ -77,14 +55,14 @@ test("a living session renews its folder's lease every hour", async ($, on) => {
   const w = world(on)
   await start($)
   await w.clock.settle()
-  expect(w.leases).toEqual([])
+  expect(w.writes).toEqual([])
   await w.clock.advance(HOUR)
-  expect(w.leases).toEqual([{ path: `${ROOT}/sess-1/.lease`, text: String(NOW + HOUR) }])
+  expect(w.writes).toEqual([{ path: `${ROOT}/sess-1/.lease`, text: String(NOW + HOUR) }])
   // Made readable by this user alone the first time only.
-  expect(w.runs.filter(argv => argv[0] === 'chmod')).toEqual([['chmod', '700', ROOT, `${ROOT}/sess-1`]])
+  expect(w.runs.filter(({ argv }) => argv[0] === 'chmod').map(({ argv }) => argv)).toEqual([['chmod', '700', ROOT, `${ROOT}/sess-1`]])
   await w.clock.advance(2 * HOUR)
-  expect(w.leases.map(lease => lease.text)).toEqual([NOW + HOUR, NOW + 2 * HOUR, NOW + 3 * HOUR].map(String))
-  expect(w.runs.filter(argv => argv[0] === 'chmod')).toHaveLength(1)
+  expect(w.writes.map(write => write.text)).toEqual([NOW + HOUR, NOW + 2 * HOUR, NOW + 3 * HOUR].map(String))
+  expect(w.runs.filter(({ argv }) => argv[0] === 'chmod')).toHaveLength(1)
 })
 
 test('an exit deletes the folder at once', async ($, on) => {
