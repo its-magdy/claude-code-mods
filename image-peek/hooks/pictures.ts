@@ -12,9 +12,9 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
 import type { PeekImage } from '../types'
-import { host, join, makeFolder, removeFiles } from './folder'
+import { join, makeFolder, removeFiles, sessionFolder } from './folder'
+import type { Folder } from './folder'
 import { platform, pngSize } from './host'
-import type { Host } from './host'
 import { capped } from './list'
 import { forget } from './picture'
 import { probe } from './session'
@@ -28,10 +28,7 @@ const images = atom({ plugin: 'image-peek', key: 'images' } as const, [], { shap
 let generation = 0
 
 /** Work of one generation, its session folder once asked for, and the files it made there. */
-export type Work = { readonly born: number; folder?: Promise<Host>; readonly files: Set<string> }
-
-/** A path's last part: the name `removeFiles` matches. */
-const fileName = (path: string) => path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1)
+export type Work = { readonly born: number; folder?: Promise<Folder>; readonly files: Set<string> }
 
 /** Work of the current generation. */
 const begin = (): Work => ({ born: generation, files: new Set() })
@@ -102,21 +99,21 @@ export async function keep($: $, work: Work, change: (list: PeekImage[]) => Peek
 /**
  * Lets go of pictures that left the list: what was kept to draw them, and
  * with `files: 'delete'` every file of theirs (each under its id, and its PNG
- * by name).
+ * by path).
  */
 async function release($: $, dropped: readonly PeekImage[], files: 'delete' | 'leave') {
   for (const img of dropped) forget(img)
   if (files === 'leave' || dropped.length === 0) return
-  await removeFiles($, await host($), dropped.map(img => img.id), dropped.map(img => fileName(img.path)))
+  await removeFiles($, await sessionFolder($), dropped.map(img => img.id), dropped.map(img => img.path))
 }
 
 /** Deletes the files the work made that no kept picture owns. */
 async function end($: $, work: Work) {
   if (work.files.size === 0 || !work.folder) return
   const owned = new Set((await read($, images)).flatMap(img => [img.path, img.thumb, img.small]))
-  const names = [...work.files].filter(path => !owned.has(path)).map(fileName)
+  const paths = [...work.files].filter(path => !owned.has(path))
   work.files.clear()
-  await removeFiles($, await work.folder, [], names)
+  await removeFiles($, await work.folder, [], paths)
 }
 
 /**

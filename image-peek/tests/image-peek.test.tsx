@@ -617,6 +617,47 @@ function fakeMac(on: Parameters<TestBody>[1], isConverting: boolean, onRun?: (ar
   return () => [...files].map(path => path.slice(STORE_DIR.length + 1)).sort()
 }
 
+const WIN_STORE_DIR = 'C:\\L\\claude-image-peek\\sess-1'
+
+/**
+ * A Windows session folder in memory: the files PowerShell writes and
+ * deletes, so a test reads what is left behind. Every conversion succeeds.
+ */
+function fakeWindows(on: Parameters<TestBody>[1]) {
+  const files = new Set<string>()
+  const ok = { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+  const parent = (path: string) => path.slice(0, path.lastIndexOf('\\'))
+  const quoted = (script: string) => [...script.matchAll(/'((?:[^']|'')*)'/g)].map(m => m[1]!.replace(/''/g, "'"))
+  // The test runs on POSIX, which reads a Windows path as relative and puts the cwd before it.
+  const windowsPath = (path: string) => path.slice(path.indexOf('C:\\'))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('env.get', (_, e) => ({ value: { OS: 'Windows_NT', LOCALAPPDATA: 'C:\\L' }[e.name] }))
+  on('ui.log', () => ({ value: undefined }))
+  on('fs.write', (_, e) => {
+    files.add(windowsPath(e.path))
+    return { value: undefined }
+  })
+  on('fs.list', (_, e) => ({
+    value: [...files]
+      .filter(path => parent(path) === windowsPath(e.path))
+      .map(path => ({ name: path.slice(path.lastIndexOf('\\') + 1), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })),
+  }))
+  on('process.run', (_, e) => {
+    const script = e.argv.at(-1) ?? ''
+    if (script.startsWith('Remove-Item')) {
+      for (const path of quoted(script)) files.delete(path)
+    } else if (script.startsWith('[IO.File]::WriteAllBytes')) {
+      files.add(quoted(script)[0]!)
+    } else if (script.includes('$b.Save(')) {
+      files.add(quoted(script).at(-1)!)
+    } else {
+      return { value: { ...ok, exitCode: 1 } } // the header read: an unknown size
+    }
+    return { value: ok }
+  })
+  return () => [...files].map(path => path.slice(WIN_STORE_DIR.length + 1)).sort()
+}
+
 const storeJpeg = ($: Parameters<TestBody>[0]) =>
   $.session.append({
     message: {
@@ -635,6 +676,17 @@ const storeJpeg = ($: Parameters<TestBody>[0]) =>
 test('a stored prompt keeps its PNG and thumbnails; the step file and /peek clear leave only the lease', { options: { graphics: 'file' } }, async ($, on) => {
   const clock = mock.clock(on)
   const left = fakeMac(on, true)
+  const { uuid } = await storeJpeg($)
+  await clock.settle()
+  expect(left()).toEqual(['.lease', `${uuid}-1.png`, `${uuid}-1.small.png`, `${uuid}-1.thumb.png`])
+
+  await $.command.run({ command: 'peek', args: 'clear', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  expect(left()).toEqual(['.lease'])
+})
+
+test('on Windows a stored prompt keeps its PNG and thumbnails; the step file and /peek clear leave only the lease', { options: { graphics: 'file' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const left = fakeWindows(on)
   const { uuid } = await storeJpeg($)
   await clock.settle()
   expect(left()).toEqual(['.lease', `${uuid}-1.png`, `${uuid}-1.small.png`, `${uuid}-1.thumb.png`])
