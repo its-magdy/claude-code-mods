@@ -5,11 +5,11 @@
 import type { EngineInterface, PluginOptions, RenderElement, RenderInput } from 'claude-code'
 
 import type { PeekImage } from '../types'
-import { Lru } from './cache'
+import { drawingCache, made, now } from './cache'
 import { platform } from './host'
 import { MAX_KEPT } from './list'
 import { bmpToCells } from './raster'
-import { fileFor, folder, generationNow, isLive, later, run } from './pictures'
+import { fileFor, folder } from './pictures'
 import type { Work } from './pictures'
 import { isFullscreen, probe } from './session'
 
@@ -29,22 +29,26 @@ const RASTER = { columns: 160, rows: 80 }
 // Module state: rebuilt after a reload, and nothing drawn depends on it alone.
 let mode: Mode | undefined
 let isTmux = false
-// Bounded by size, least recently used out: a dropped entry is only read or
-// made again. Keys name the picture and the generation it is listed in, so a
-// picture that left the list is never asked for again, and one restored at
-// the same path (its files made anew) is drawn afresh. 32M base64 chars hold the band's dozen previews even at the
-// 2 MiB cap. The cells' budget is three of the largest views for every kept
-// image plus one: the sizes on screen at once (inline, card, band, the pane's
-// list and its big view) weigh less, so making one never evicts another still
-// drawn (a loop of make, redraw, make). Only sizes left by a resize, and
-// pictures that left the list, age out.
+// The drawing's caches (see cache.ts), bounded by size, least recently used
+// out: a dropped entry is only read or made again. A new generation starts
+// them empty, and keys name the picture as made (its id and when it was
+// added), so a picture that left the list is never asked for again, and one
+// restored at the same path (its files made anew) is drawn afresh. 32M
+// base64 chars hold the band's dozen previews even at the 2 MiB cap. The
+// cells' budget is three of the largest views for every kept image plus one:
+// the sizes on screen at once (inline, card, band, the pane's list and its
+// big view) weigh less, so making one never evicts another still drawn (a
+// loop of make, redraw, make). Only sizes left by a resize age out.
 const CELL_CHARS = (RASTER.columns * RASTER.rows * 12 * 4) / 3
-const pngCache = new Lru<string | null>(32 * 1024 * 1024, value => value?.length ?? 0)
-const cellCache = new Lru<string | null>((MAX_KEPT * 3 + 1) * CELL_CHARS, value => value?.length ?? 0)
-/** Cells being made, by key: the drawing and `warm` share one job, and so one BMP file. */
-const cellJobs = new Map<string, Promise<void>>()
-/** Keys a drawing waits on until their cells are in, with the work that waits: a newer generation drops it unrun. */
-const cellAsked = new Map<string, Work>()
+
+/** A listed picture, as made: a picture made again is a new one. */
+const pictureKey = (img: PeekImage) => `${img.id}|${img.addedAt}`
+
+/** PNGs' bytes, read while drawing (no process runs), once per file. */
+const pngs = drawingCache('png', 32 * 1024 * 1024, (base64: string) => base64.length)
+
+/** Pictures' half-block cells for one size, made off the drawing: a process runs. */
+const cells = drawingCache('cells', (MAX_KEPT * 3 + 1) * CELL_CHARS, (packed: string) => packed.length)
 
 /** How this terminal can show a picture: the setting, else a guess from its env. */
 export async function graphics($: $, options: PluginOptions): Promise<Mode> {
@@ -103,69 +107,35 @@ const cellSize = (img: PeekImage, columns: number, rows: number): Size => {
   return { columns: Math.min(size.columns, RASTER.columns), rows: Math.min(size.rows, RASTER.rows) }
 }
 
-/** A listed picture, as made in this generation: a picture made again is a new one. */
-const pictureKey = (img: PeekImage) => `${generationNow()}|${img.id}|${img.addedAt}`
-
-const cellKey = (img: PeekImage, size: Size) => `${pictureKey(img)}|${img.small}|${size.columns}x${size.rows}`
-
-/** Makes the half-block cells for one size; a process runs, so never while drawing. */
-function makeCells($: $, img: PeekImage, size: Size) {
-  const key = cellKey(img, size)
-  if (cellCache.has(key)) return Promise.resolve()
-  let job = cellJobs.get(key)
-  if (!job) {
-    job = convertCells($, img, size, key).finally(() => cellJobs.delete(key))
-    cellJobs.set(key, job)
-  }
-  return job
-}
-
-async function convertCells($: $, img: PeekImage, size: Size, key: string) {
-  // The cells are all that's kept; each window size would leave a BMP behind.
-  await run($, async work => {
-    // A folder that can't be made can't hold the BMP: no cells, not a retry each drawing.
-    const h = await folder($, work).catch(() => undefined)
-    if (!h) {
-      cellCache.set(key, null)
-      return
-    }
-    const bmp = await fileFor($, work, { role: 'cells', id: img.id, ...size })
-    const ok = await (await platform($)).toBmp(img.small, bmp, size.columns, size.rows * 2)
-    const { base64 } = ok ? await $.fs.read(bmp, { as: 'bytes' }).catch(() => ({ base64: '' })) : { base64: '' }
-    // Dropped while its cells were made (a newer generation drops every
-    // listed picture), they go under a key no drawing asks for again.
-    cellCache.set(key, base64 ? (bmpToCells(base64, size.columns, size.rows) ?? null) : null)
+/** A PNG's bytes for the drawing, at most MAX_BYTES of them. */
+function pngBytes($: $, img: PeekImage, path: string) {
+  return made($, pngs, `${pictureKey(img)}|${path}`, async () => {
+    const { base64 } = await $.fs.read(path, { as: 'bytes' }).catch(() => ({ base64: '' }))
+    return base64 && (base64.length * 3) / 4 <= MAX_BYTES ? base64 : undefined
   })
 }
 
-/** Cells for a size, or undefined while they are made off the drawing; the drawing comes again once they are. */
-function cells($: $, img: PeekImage, size: Size) {
-  const key = cellKey(img, size)
-  if (cellCache.has(key)) return cellCache.get(key) ?? undefined
-  // One waiter per key, even when `warm` already started the job: it
-  // redraws once the cells are in.
-  const asked = cellAsked.get(key)
-  if (!asked || !isLive(asked)) {
-    const work = later($, 'cells', async () => {
-      try {
-        await makeCells($, img, size)
-      } finally {
-        if (cellAsked.get(key) === work) cellAsked.delete(key)
-      }
-      $.ui.invalidate('ui.render')
-    })
-    cellAsked.set(key, work)
-  }
-  return undefined
+const cellKey = (img: PeekImage, size: Size) => `${pictureKey(img)}|${img.small}|${size.columns}x${size.rows}`
+
+/** Makes a picture's cells for one size: the BMP `sips` writes, read back. */
+async function makeCells($: $, work: Work, img: PeekImage, size: Size) {
+  // A folder that can't be made can't hold the BMP: no cells, not a retry each drawing.
+  if (!(await folder($, work).catch(() => undefined))) return undefined
+  // The cells are all that's kept; each window size would leave a BMP behind.
+  const bmp = await fileFor($, work, { role: 'cells', id: img.id, ...size })
+  const ok = await (await platform($)).toBmp(img.small, bmp, size.columns, size.rows * 2)
+  const { base64 } = ok ? await $.fs.read(bmp, { as: 'bytes' }).catch(() => ({ base64: '' })) : { base64: '' }
+  return base64 ? bmpToCells(base64, size.columns, size.rows) : undefined
 }
 
-async function pngBytes($: $, img: PeekImage, path: string) {
-  const key = `${pictureKey(img)}|${path}`
-  if (!pngCache.has(key)) {
-    const { base64 } = await $.fs.read(path, { as: 'bytes' }).catch(() => ({ base64: '' }))
-    pngCache.set(key, base64 && (base64.length * 3) / 4 <= MAX_BYTES ? base64 : null)
-  }
-  return pngCache.get(key) ?? undefined
+/** Cells for a size now, or undefined while they are made off the drawing; the drawing comes again once they are. */
+function cellsNow($: $, img: PeekImage, size: Size) {
+  return now($, cells, cellKey(img, size), work => makeCells($, work, img, size))
+}
+
+/** Cells for a size made ahead; the drawing shares the job. */
+function cellsMade($: $, img: PeekImage, size: Size) {
+  return made($, cells, cellKey(img, size), work => makeCells($, work, img, size))
 }
 
 /** One picture at most `columns` x `rows` cells, drawn the way this terminal can; no process runs here. */
@@ -190,7 +160,7 @@ export async function draw(
   }
   if (how === 'blocks' || how === 'bytes') {
     const box = cellSize(img, columns, rows)
-    const packed = cells($, img, box)
+    const packed = cellsNow($, img, box)
     if (packed) return <Raster key={`ras-${img.id}-${view}`} {...box} cells={packed} />
     return <Text dimColor>[{alt}…]</Text>
   }
@@ -200,7 +170,7 @@ export async function draw(
 /** Makes ahead the cells of the fixed views, so a message row draws blocks at once. */
 export async function warm($: $, options: PluginOptions, img: PeekImage) {
   const how = await graphics($, options)
-  if (how === 'blocks' || how === 'bytes') await makeCells($, img, cellSize(img, INLINE.columns, INLINE.rows))
-  if (how === 'blocks') await makeCells($, img, cellSize(img, CARD.columns, CARD.rows))
+  if (how === 'blocks' || how === 'bytes') await cellsMade($, img, cellSize(img, INLINE.columns, INLINE.rows))
+  if (how === 'blocks') await cellsMade($, img, cellSize(img, CARD.columns, CARD.rows))
 }
 

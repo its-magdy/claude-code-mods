@@ -452,6 +452,115 @@ test('blocks: a sent picture draws a placeholder, then its cells once made off t
   await row.unmount()
 })
 
+/** A promise and the function that resolves it. */
+function deferred() {
+  let resolve = () => {}
+  const promise = new Promise<void>(r => {
+    resolve = r
+  })
+  return { promise, resolve }
+}
+
+test('blocks: a picture drawn many times while its cells are made asks exactly one redraw', { options: { graphics: 'blocks' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  on('state.get', seed({ images: [SHOT], isDebug: false }))
+  const { runs } = machine(on, { env: {}, disk: [SHOT.small] })
+  on('fs.read', () => ({ value: { base64: tinyBmp() } }))
+  on('ui.log', () => ({ value: undefined }))
+  const redraws: string[] = []
+  on('ui.invalidate', (_, e) => {
+    redraws.push(e.event)
+    return { value: undefined }
+  })
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  const ROW = {
+    plugin: 'image-peek',
+    surface: 'terminal',
+    component: 'UserMessage',
+    requestId: 'msg-1',
+    viewport: { columns: 100, rows: 40, isFullscreen: false },
+    props: { text: 'fix the margin in [Image #1]', origin: { kind: 'composer' }, isExpanded: false },
+  } as const
+
+  for (let i = 0; i < 3; i++) {
+    const row = await $.ui.mount(ROW)
+    expect(await row.find({ type: 'Raster' })).toBeUndefined()
+    await row.unmount()
+  }
+  await clock.settle()
+
+  expect(redraws).toEqual(['ui.render'])
+  expect(runs.filter(({ argv }) => argv[0] === 'sips' && argv.at(-1)!.endsWith('.bmp'))).toHaveLength(1)
+  const row = await $.ui.mount(ROW)
+  expect((await row.find({ type: 'Raster' }))?.props.columns).toBe(28)
+  await row.unmount()
+  // Drawn from the cache: no new job, no new redraw.
+  expect(redraws).toEqual(['ui.render'])
+})
+
+test('blocks: warming a stored picture and drawing it meanwhile share one sips run', { options: { graphics: 'blocks' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const stored = new Map<string, unknown>()
+  let version = 0
+  on('state.get', (_, e) => ({ value: { value: stored.get(e.key), version } }))
+  on('state.set', (_, e) => {
+    stored.set(e.key, e.value)
+    return { value: { isSet: true, version: ++version } }
+  })
+  on('ui.log', () => ({ value: undefined }))
+  const redraws: string[] = []
+  on('ui.invalidate', (_, e) => {
+    redraws.push(e.event)
+    return { value: undefined }
+  })
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  // The inline cells' BMP (28 x 7 for an 800 x 400 thumbnail) waits until the row is drawn.
+  const reached = deferred()
+  const gate = deferred()
+  const isInlineBmp = (argv: readonly string[]) => argv[0] === 'sips' && argv.at(-1)!.endsWith('-28x7.bmp')
+  const { runs } = machine(on, {
+    onRun: async argv => {
+      if (!isInlineBmp(argv)) return
+      reached.resolve()
+      await gate.promise
+    },
+  })
+  on('fs.read', () => ({ value: { base64: tinyBmp() } }))
+  const ROW_OF = (requestId: string) =>
+    ({
+      plugin: 'image-peek',
+      surface: 'terminal',
+      component: 'UserMessage',
+      requestId,
+      viewport: { columns: 100, rows: 40, isFullscreen: false },
+      props: { text: 'look at [Image #1]', origin: { kind: 'composer' }, isExpanded: false },
+    }) as const
+
+  const { uuid } = await storeJpeg($)
+  void clock.settle()
+  await reached.promise
+  // `warm` is making the inline cells: the drawing waits on that same job.
+  const row = await $.ui.mount(ROW_OF(uuid!))
+  expect(await row.find({ type: 'Raster' })).toBeUndefined()
+  await clock.settle()
+  gate.resolve()
+  await clock.settle()
+
+  expect(runs.filter(({ argv }) => isInlineBmp(argv))).toHaveLength(1)
+  expect(redraws).toEqual(['ui.render'])
+  await row.unmount()
+  // The redraw (answered above, so drawn here by hand) finds the cells in.
+  const again = await $.ui.mount(ROW_OF(uuid!))
+  expect((await again.find({ type: 'Raster' }))?.props.columns).toBe(28)
+  await again.unmount()
+})
+
 test('blocks: a picture cleared and then restored at the same path draws its cells again, made afresh', { options: { graphics: 'blocks' } }, async ($, on) => {
   const clock = mock.clock(on)
   // A store the mod can write: `/peek clear` empties the list.
