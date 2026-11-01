@@ -1,10 +1,12 @@
-// The session's pictures: the image list, the generation, and the files
-// work makes for it (`finish` makes a picture's PNG and thumbnails). Work is
-// had only through `later` or `run`, which end it: it names each file it
-// makes here, in the session folder it finds and makes on first use, and
-// when it ends, whatever no kept picture owns is deleted. A
+// The session's pictures: the image list, the generation, and each
+// picture's files. Every file of a picture's is named here, by its role (the
+// bytes it came as, a copy of a dropped file, its PNG and thumbnails, a BMP
+// its cells are read from), in the session folder the work finds and makes
+// on first use. A listed picture owns its PNG and thumbnails; they go when it
+// leaves the list. Work is had only through `later` or `run`, which end it:
+// whatever it made that no kept picture owns is deleted then. A
 // new generation (a session end, /clear, /resume, /peek clear) outlives the
-// work begun before it: the work's own steps (`claim`, `finish`, `keep`)
+// work begun before it: the work's own steps (`fileFor`, `finish`, `keep`)
 // stop it before it changes the list, `later` and `run` end it quietly, and
 // its files go.
 
@@ -12,7 +14,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
 import type { PeekImage } from '../types'
-import { join, makeFolder, removeFiles, sessionFolder } from './folder'
+import { join, makeFolder } from './folder'
 import type { Folder } from './folder'
 import { platform } from './host'
 import type { Platform } from './host'
@@ -74,16 +76,69 @@ export function folder($: $, work: Work) {
   return work.folder
 }
 
+/** A file of a picture's, by what it is for: its role names it. */
+export type PictureFile =
+  /** The bytes as they came: the clipboard's image, a stored row's base64. */
+  | { role: 'source'; id: string; ext: string }
+  /** A dropped or pasted file, copied in before it has a picture. */
+  | { role: 'copy'; ext: string }
+  /** The BMP a picture's cells for one size are read from. */
+  | { role: 'cells'; id: string; columns: number; rows: number }
+
+/** The files `finish` makes: the PNG and its two thumbnails. */
+type MadeFile = { role: 'png' | 'thumb' | 'small'; id: string }
+
+let copies = 0
+
+/** Each file's name in the folder; a copy's is unique even in the same millisecond. */
+async function nameOf($: $, file: PictureFile | MadeFile) {
+  switch (file.role) {
+    case 'source':
+      return `${file.id}.${file.ext.replace(/^\./, '')}`
+    case 'copy':
+      return `drop-${await $.clock.now()}-${++copies}.${file.ext.replace(/^\./, '')}`
+    case 'cells':
+      return `${file.id}-${file.columns}x${file.rows}.bmp`
+    case 'png':
+      return `${file.id}.png`
+    case 'thumb':
+      return `${file.id}.thumb.png`
+    case 'small':
+      return `${file.id}.small.png`
+  }
+}
+
 /**
- * A path in the work's folder for it to make; deleted when the work ends,
- * unless a kept picture owns it. Code that writes into the folder takes its
- * path from here: a file written past it is never deleted. Stale work stops here.
+ * Whether a path is one this module named, in a session's folder: deleting
+ * goes by what a picture recorded, and never past these.
  */
-export async function claim($: $, work: Work, name: string) {
-  const path = join(await folder($, work), name)
+const isNamedHere = (path: string) =>
+  /claude-image-peek[\\/][A-Za-z0-9_-]+[\\/](drop-\d+-\d+|[A-Za-z0-9_-]+(\.thumb|\.small|-\d+x\d+)?)\.[A-Za-z0-9]+$/.test(path)
+
+/** The path for the work to make the file at; deleted when the work ends, unless a kept picture owns it. Stale work stops here. */
+async function claim($: $, work: Work, file: PictureFile | MadeFile) {
+  const path = join(await folder($, work), await nameOf($, file))
   stopIfStale(work)
   work.files.add(path)
   return path
+}
+
+/**
+ * Where the work makes a picture's file in the role `file` names. Code that
+ * writes into the folder takes its path from here: a file written past it is
+ * never deleted. Stale work stops here.
+ */
+export function fileFor($: $, work: Work, file: PictureFile) {
+  return claim($, work, file)
+}
+
+/** The files a listed picture owns: its PNG and thumbnails (one path when no thumbnail was made). */
+const filesOf = (img: PeekImage) => [img.path, img.thumb, img.small]
+
+/** Deletes files this module named, each once. */
+async function remove($: $, paths: readonly string[]) {
+  const doomed = [...new Set(paths)].filter(isNamedHere)
+  if (doomed.length > 0) await (await platform($)).removeFiles(doomed)
 }
 
 /** The image list. */
@@ -117,21 +172,20 @@ export async function keep($: $, work: Work, change: (list: PeekImage[]) => Peek
 }
 
 /**
- * Lets go of pictures that left the list: with `files: 'delete'` every file
- * of theirs (each under its id, and its PNG by path).
+ * Lets go of pictures that left the list: with `files: 'delete'` the files
+ * each recorded as its own, wherever the session's folder is now.
  */
 async function release($: $, dropped: readonly PeekImage[], files: 'delete' | 'leave') {
-  if (files === 'leave' || dropped.length === 0) return
-  await removeFiles($, await sessionFolder($), dropped.map(img => img.id), dropped.map(img => img.path))
+  if (files === 'delete') await remove($, dropped.flatMap(filesOf))
 }
 
 /** Deletes the files the work made that no kept picture owns. */
 async function end($: $, work: Work) {
-  if (work.files.size === 0 || !work.folder) return
-  const owned = new Set((await read($, images)).flatMap(img => [img.path, img.thumb, img.small]))
+  if (work.files.size === 0) return
+  const owned = new Set((await read($, images)).flatMap(filesOf))
   const paths = [...work.files].filter(path => !owned.has(path))
   work.files.clear()
-  await removeFiles($, await work.folder, [], paths)
+  await remove($, paths)
 }
 
 /**
@@ -161,13 +215,13 @@ export async function finish(
   const p = await platform($)
   let path = base.file
   if (!/\.png$/i.test(path)) {
-    const png = await claim($, work, `${base.id}.png`)
+    const png = await claim($, work, { role: 'png', id: base.id })
     if (!(await p.toPng(path, png))) return undefined
     path = png
   }
-  const thumb = await claim($, work, `${base.id}.thumb.png`)
+  const thumb = await claim($, work, { role: 'thumb', id: base.id })
   const shown = (await p.toPng(path, thumb, 800)) ? thumb : path
-  const small = await claim($, work, `${base.id}.small.png`)
+  const small = await claim($, work, { role: 'small', id: base.id })
   const smallShown = (await p.toPng(shown, small, 400)) ? small : shown
   const { width, height } = await pngSize(p, shown)
   const { file: _file, ...rest } = base

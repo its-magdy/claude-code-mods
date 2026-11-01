@@ -14,7 +14,7 @@ import type { Shot } from './host'
 import { addDraft, dropDrafts, hasDraft, placeholders, submitDrafts } from './list'
 import { offerPane } from './pane'
 import { warm } from './picture'
-import { claim, finish, folder, keep, later, perGeneration, pictures, run } from './pictures'
+import { fileFor, finish, folder, keep, later, perGeneration, pictures, run } from './pictures'
 import type { Work } from './pictures'
 import { probe } from './session'
 
@@ -46,7 +46,7 @@ const intake = perGeneration(() => ({
 }))
 
 let stamps = 0
-/** A file-name stamp no other capture or copy shares, even in the same millisecond. */
+/** A draft id's stamp no other capture shares, even in the same millisecond. */
 async function uniqueStamp($: $) {
   return `${await $.clock.now()}-${++stamps}`
 }
@@ -123,10 +123,10 @@ async function copyDropped($: $, work: Work, paths: string[]) {
   const p = await platform($)
   const home = (await $.env.get('HOME')) ?? ''
   const copies: string[] = []
-  for (const [i, path] of paths.entries()) {
+  for (const path of paths) {
     const from = await p.localPath(path.startsWith('~/') ? home + path.slice(1) : path)
-    const ext = from.match(/\.[A-Za-z0-9]+$/)?.[0] ?? '.png'
-    const copy = await claim($, work, `drop-${await uniqueStamp($)}-${i}${ext}`)
+    const ext = from.match(/\.([A-Za-z0-9]+)$/)?.[1] ?? 'png'
+    const copy = await fileFor($, work, { role: 'copy', ext })
     if (await p.copyFile(from, copy)) copies.push(copy)
   }
   return copies
@@ -183,7 +183,7 @@ async function pickSource(
 ): Promise<{ file: string; source: PeekSource } | undefined> {
   if (file) return { file, source: 'file' }
   const p = await platform($)
-  const out = await claim($, work, `${id}.png`)
+  const out = await fileFor($, work, { role: 'source', id, ext: 'png' })
   const { usedShots } = intake(work)
   const grab = await p.grabClipboard(out)
   const isStale = grab.change !== undefined && grab.change === lastChange

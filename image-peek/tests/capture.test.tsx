@@ -160,6 +160,21 @@ async function paste($: Parameters<TestBody>[0], w: ReturnType<typeof world>, te
   await w.clock.settle()
 }
 
+test('a /peek clear deletes a dropped picture\'s copy with its thumbnails', { options: { graphics: 'off' } }, async ($, on) => {
+  const shot = 'Screenshot 2026-10-28 at 9.00.00\u202fPM.png'
+  // The clipboard holds nothing new: the screenshot saved just now is copied in.
+  const w = world(on, { clipboard: { change: 3, types: [], isImage: false }, prompt: '', desktop: [shot] })
+  await paste($, w, '[Image #1]')
+  const [dropped] = w.list()
+  expect(dropped?.source).toBe('file')
+  expect(name(dropped!.path)).toMatch(/^drop-/)
+  expect(w.files()).toContain(name(dropped!.path))
+
+  await $.command.run({ command: 'peek', args: 'clear', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  expect(w.list()).toEqual([])
+  expect(w.files()).toEqual(['.lease'])
+})
+
 test('the clipboard unchanged since the last paste: a screenshot saved just now is taken instead', { options: { graphics: 'off' } }, async ($, on) => {
   const shot = 'Screenshot 2026-10-28 at 9.00.00\u202fPM.png'
   const w = world(on, { clipboard: PNG_CLIPBOARD, prompt: '', desktop: [shot] })
