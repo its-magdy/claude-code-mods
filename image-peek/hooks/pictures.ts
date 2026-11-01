@@ -36,6 +36,21 @@ const begin = (): Work => ({ born: generation, files: new Set() })
 /** False once a newer generation began: the work's next step stops it. */
 export const isLive = (work: Work) => work.born === generation
 
+/**
+ * A value per generation: the work's, else the current one's. It is made
+ * anew on the first ask once a newer generation began. Stale work never
+ * gets a newer generation's value.
+ */
+export function perGeneration<T>(make: () => T): (work?: Work) => T {
+  let held: { born: number; value: T } | undefined
+  return (work = begin()) => {
+    if (held?.born === work.born) return held.value
+    if (!isLive(work)) return make()
+    held = { born: work.born, value: make() }
+    return held.value
+  }
+}
+
 /** What a step of stale work throws; `later` and `run` catch it and end the work. */
 class Stale extends Error {}
 
